@@ -1,132 +1,197 @@
-# Insider Threat Behavioral Intelligence System (ITBIS)
+# 🛡️ Insider Threat Behavioral Intelligence System (ITBIS)
 
-A security platform built with **FastAPI** designed to monitor, log, and analyze employee activities for insider threat behavior, detect anomalies, calculate risk scores, and manage security incidents.
+An **AI-powered insider threat detection platform** that continuously monitors employee activities, builds behavioral profiles, detects anomalies with machine learning, scores insider risk, and drives security investigations.
+
+Built with **FastAPI** + **React**, running on the **real CERT Insider Threat Test Dataset** (CMU SEI).
 
 ---
 
-## 🚀 Project Overview
+## ✨ Features
 
-ITBIS allows security operations center (SOC) analysts and administrators to monitor behavioral baselines, track activity logs, trigger real-time alerts, and manage incident lifecycles. 
+### 🔐 Authentication & Role-Based Access
+- JWT authentication with bcrypt password hashing
+- 4 roles: `administrator`, `security_manager`, `soc_engineer`, `security_analyst`
+- Role-protected endpoints via dependency injection
+
+### 👤 Employee Identity & Monitoring
+- Employee onboarding with department, designation, manager, device info & access privileges
+- **8 monitored activity types**: login, file download/upload, data transfer, email, privilege change, remote access, USB device
+
+### 🧠 Behavioral Profiling Engine
+- Per-employee behavioral baselines (activity distribution, hourly patterns, off-hours/weekend ratios, burst detection)
+- **Peer-group comparison** against department peers
+
+### ⚡ Anomaly Detection (2 Engines)
+- **Statistical/rule-based**: Z-score, IQR, off-hours transfers, USB spikes, privilege escalation, large downloads, late-night & weekend patterns
+- **🤖 ML (Isolation Forest)**: unsupervised scikit-learn model on 14 behavioral features — scores every employee 0–100 with explainable top deviating factors, plus ground-truth validation against known insider labels
+
+### 🎯 Insider Risk Scoring
+- Weighted multi-model threat engine (data exfiltration, off-hours access, privilege abuse, policy violations, behavioral deviation)
+- Risk persisted with full breakdowns; org-wide analytics: trend, department breakdown, top contributors
+
+### 🕵️ UEBA Intelligence Pipeline
+- One-call pipeline: baselines → anomaly detection → threat assessment → risk persistence
+- Consolidated per-employee UEBA profiles
+
+### 🚨 Alerts & Incident Investigation
+- Severity levels (informational → critical), alert lifecycle, alert→incident escalation
+- Incident timelines with audited actors, status workflows, related-alert resolution
+
+### 📊 Dashboards & Reports
+- SOC dashboard (org risk trend, top insider threats, recent alerts, activity trends)
+- 12 frontend pages: Dashboard, Employees, Activity Logs, UEBA Intelligence, Anomaly Detection (+ML tab), Behavioral Analysis, Alerts, Incidents, Risk Scores, Anomaly Reports, Login
+
+---
+
+## 🗄️ Real Dataset — CERT Insider Threat Test Dataset (r1)
+
+The platform runs on **real insider-threat data** from the CMU SEI CERT Insider Threat Test Dataset instead of synthetic data:
+
+| Component | Source file | Volume |
+|-----------|-------------|--------|
+| 1,000 employees | `LDAP/*.csv` | real names, roles, emails |
+| Login events | `logon.csv` | 849K |
+| USB device events | `device.csv` | 65K |
+| Web/network events | `http.csv` | 3.45M |
+| **Total real events** | | **4.37M** |
+
+- **Ground-truth insider labels** saved to `data/cert/insiders.json` for evaluating detection models
+- Timestamps are **rebased to the present** so the platform's 30-day analytics windows work with the 2010–2011 data (relative behavior is preserved; use `--no-rebase` to keep original dates)
+- Dataset license: free for research/educational use (see `data/cert/license.txt`)
+
+**Ingest the real data:**
+```bash
+python scripts/ingest_cert.py --all            # download (87 MB) + extract + ingest
+python scripts/ingest_cert.py --all --clear    # replace existing data
+python scripts/ingest_cert.py --all --max-users 200   # smaller subset
+```
 
 ---
 
 ## 🛠️ Tech Stack
 
-*   **Framework:** FastAPI (Python 3.11+)
-*   **Database:** PostgreSQL (v16)
-*   **ORM:** SQLAlchemy (v2.0+)
-*   **Database Migrations:** Alembic
-*   **Cache / Key-Value Store:** Redis (v7)
-*   **Authentication & Security:** JWT (Jose), Passlib (Bcrypt) for password hashing, and Role-Based Access Control (RBAC)
-*   **Infrastructure:** Docker Compose
+| Layer | Technology |
+|-------|-----------|
+| Backend | Python · FastAPI · SQLAlchemy 2 · Alembic |
+| AI/ML | scikit-learn (Isolation Forest) · NumPy |
+| Database | PostgreSQL 16 · Redis 7 |
+| Auth | JWT (python-jose) · Passlib (bcrypt) |
+| Frontend | React 19 · TypeScript · Vite · Tailwind CSS 4 · Recharts · lucide-react |
+| Infrastructure | Docker Compose |
 
 ---
 
-## 📈 Current Project Progress & Features
-
-The project is structured into modular layers (routers, schemas, models, services) and currently has the following foundations implemented:
-
-### 1. Core API & Skeleton Setup
-*   **FastAPI Application Entry Point (`app/main.py`):** Configured with system settings and routing.
-*   **Health Check Endpoint:** `/health` endpoint to verify application status.
-*   **Config Management (`app/core/config.py`):** Structured configuration loading using Pydantic Settings from a `.env` file.
-
-### 2. Database Architecture (SQLAlchemy Models)
-We have fully defined and mapped the **7 Core Database Tables** in SQLAlchemy (`app/models/`):
-*   **`User`**: Admin and analyst accounts who manage the platform. Includes Role-Based Access Control (RBAC) with defined roles:
-    *   `administrator`
-    *   `security_manager`
-    *   `soc_engineer`
-    *   `security_analyst`
-*   **`Employee`**: Monitored corporate employees, including metadata like department, designation, manager details, and JSON-based fields for device info and access privileges.
-*   **`ActivityLog`**: Logs monitoring employee actions such as `login`, `file_download`, `file_upload`, `data_transfer`, `email`, `privilege_change`, `remote_access`, and `usb_device`.
-*   **`BehavioralBaseline`**: JSON-based profile representing baseline behavioral metrics for employees. Used for deviation analysis.
-*   **`RiskScore`**: Dynamic risk score values and detailed breakdowns calculated for employees over time.
-*   **`Alert`**: System-generated alerts triggered by anomalous activity with tracking states (`open`, `acknowledged`, `resolved`, `dismissed`) and severity levels (`informational`, `low`, `medium`, `high`, `critical`).
-*   **`Incident`**: Escalated security incident cases linked to employees and assigned to analysts with investigation timelines and status.
-
-### 3. User Authentication & Authorization
-*   **Secure Password Hashing:** Implemented with `passlib` using the Bcrypt algorithm.
-*   **JSON Web Tokens (JWT):** Access token generation, expiration handling, and decoding utilities using `python-jose`.
-*   **API v1 Auth Endpoints (`app/api/v1/auth.py`):**
-    *   `POST /api/v1/auth/register`: Signup endpoint to register platform users.
-    *   `POST /api/v1/auth/login`: Authenticates users and issues Bearer access tokens.
-*   **Dependency Injection & Role-Based Security (`app/core/deps.py`):**
-    *   `get_current_user`: Secures endpoints and retrieves authenticated user context.
-    *   `require_role(...)`: Simple middleware/decorator to restrict route access by role (e.g. administrator or security manager).
-
-### 4. Infrastructure & Migrations
-*   **Docker Compose Setup (`docker-compose.yml`):** Preconfigured to spin up local instances of:
-    *   PostgreSQL database on port `5433`
-    *   Redis container on port `6379`
-*   **Alembic Migrations:** Alembic configuration and initial migration scripts are set up under `/alembic` to automatically provision the database tables.
-
----
-
-## 📂 Directory Structure
+## 📂 Project Structure
 
 ```text
-├── alembic/                # Alembic database migration scripts
 ├── app/
-│   ├── api/
-│   │   └── v1/
-│   │       └── auth.py     # Auth API endpoints (register, login)
-│   ├── core/
-│   │   ├── config.py       # Configuration and Environment loading
-│   │   ├── deps.py         # Dependencies (auth, role checks, get_db)
-│   │   └── security.py     # JWT & Password utility functions
-│   ├── db/
-│   │   └── base.py         # DB Engine, SessionLocal, Base model
-│   ├── models/             # SQLAlchemy Models (User, Employee, ActivityLog, etc.)
-│   ├── schemas/            # Pydantic Schemas for validation and serialization
-│   │   └── user.py         # User & Token schemas
-│   ├── services/           # Business logic layer
-│   │   └── auth_service.py # Authentication database services
-│   └── main.py             # FastAPI App initialisation
-├── docker-compose.yml      # Local DB & Redis service configuration
-├── requirements.txt        # Python dependency packages
-├── .env.example            # Environment variables template
-└── .gitignore              # Files ignored by git
+│   ├── api/v1/            # Routers: auth, employees, activity_logs, alerts,
+│   │                      #   incidents, risk_scores, dashboard, anomaly, reports, ueba
+│   ├── core/              # config.py, security.py (JWT/hashing), deps.py (auth/RBAC)
+│   ├── db/base.py         # Engine, SessionLocal, Base
+│   ├── models/            # 7 tables: User, Employee, ActivityLog, BehavioralBaseline,
+│   │                      #   RiskScore, Alert, Incident
+│   ├── schemas/           # Pydantic request/response models
+│   ├── services/          # auth, behavioral_profiling, anomaly_detection,
+│   │                      #   ml_anomaly_detection, threat_detection, risk_scoring,
+│   │                      #   ueba, report_service
+│   └── main.py            # FastAPI app entrypoint
+├── frontend/src/
+│   ├── pages/             # 13 pages (Dashboard … IncidentDetail)
+│   ├── api/               # typed API clients
+│   ├── components/        # Layout, ProtectedRoute
+│   └── context/           # AuthContext
+├── scripts/
+│   ├── ingest_cert.py     # Real CERT dataset ingestion
+│   └── seed_data.py       # Synthetic demo data generator (fallback)
+├── alembic/               # DB migrations
+├── docker-compose.yml     # PostgreSQL + Redis
+└── requirements.txt
 ```
 
 ---
 
-## 🛠️ Getting Started Locally
+## 🚀 Getting Started
 
 ### 1. Prerequisites
-*   Python 3.11 or higher
-*   Docker & Docker Compose
+- Python 3.11+ · Node 18+ · Docker & Docker Compose
 
-### 2. Environment Setup
-Clone the template env file and configure your local settings:
+### 2. Environment
 ```bash
 cp .env.example .env
+docker compose up -d          # PostgreSQL (:5433) + Redis (:6379)
 ```
 
-### 3. Run External Services
-Start the database and caching services using Docker Compose:
-```bash
-docker compose up -d
-```
-
-### 4. Setup Virtual Environment & Install Dependencies
-Create a virtual environment and install the required Python packages:
+### 3. Backend
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+alembic upgrade head          # create the 7 tables
+python scripts/ingest_cert.py --all --clear   # load real CERT data
+uvicorn app.main:app --reload                 # http://127.0.0.1:8000/docs
 ```
 
-### 5. Run Database Migrations
-Provision the PostgreSQL database with the Alembic migration history:
+### 4. Frontend
 ```bash
-alembic upgrade head
+cd frontend
+npm install
+npm run dev                   # http://localhost:5173
 ```
 
-### 6. Run the Application
-Start the FastAPI development server:
-```bash
-uvicorn app.main:app --reload
-```
+### 5. Demo Accounts
+| Role | Email | Password |
+|------|-------|----------|
+| Administrator | `admin@itbis.com` | `admin123` |
+| Security Manager | `manager@itbis.com` | `manager123` |
+| Security Analyst | `analyst@itbis.com` | `analyst123` |
 
-The application will be live at `http://127.0.0.1:8000`. You can access the auto-generated API documentation at `http://127.0.0.1:8000/docs`.
+### 6. First Run Workflow
+1. Log in → Dashboard shows org risk posture & top threats
+2. **UEBA Intelligence** → *Run Pipeline* to refresh baselines/anomalies/risk
+3. **Anomaly Detection → ML Detection tab** → *Run ML Detection* (Isolation Forest)
+4. **Risk Scores** → *Recalculate* + explore analytics
+5. **Alerts** → escalate to an incident → **Incidents** → investigate via timeline
+
+---
+
+## 🔌 Key API Endpoints
+
+| Area | Endpoints |
+|------|-----------|
+| Auth | `POST /api/v1/auth/register` · `POST /api/v1/auth/login` |
+| Employees | `GET/POST /api/v1/employees` · `GET/PUT/DELETE /api/v1/employees/{id}` · stats |
+| Activity | `GET/POST /api/v1/activity-logs` · `POST /api/v1/activity-logs/bulk` |
+| Anomaly | `POST /api/v1/anomaly/detect` · `POST /api/v1/anomaly/ml/detect` · `GET /api/v1/anomaly/ml/results` · `POST /api/v1/anomaly/baselines/compute` · `GET /api/v1/anomaly/threat/top` |
+| Risk | `POST /api/v1/risk-scores/calculate` · `GET /api/v1/risk-scores/analytics` · `GET /api/v1/risk-scores/distribution` |
+| UEBA | `POST /api/v1/ueba/pipeline` · `GET /api/v1/ueba/overview` · `GET /api/v1/ueba/overview/{employee_id}` |
+| Alerts | `GET/POST /api/v1/alerts` · `PATCH /api/v1/alerts/{id}` · `POST /api/v1/alerts/{id}/escalate` |
+| Incidents | `GET/POST /api/v1/incidents` · `PATCH /api/v1/incidents/{id}` · `POST /api/v1/incidents/{id}/timeline` · `GET /api/v1/incidents/{id}/related-alerts` |
+| Reports | `GET /api/v1/reports/anomaly` · `GET /api/v1/reports/employee/{employee_id}` |
+| Dashboard | `GET /api/v1/dashboard/stats` · `GET /api/v1/dashboard/recent-alerts` · `GET /api/v1/dashboard/activity-trends` |
+
+---
+
+## 📈 Performance Notes
+
+- Behavioral baseline peer-comparison uses SQL aggregation — whole-org baseline computation runs in minutes even at **1,000 employees / 4.37M events**
+- ML anomaly detection scores 1,000 employees in ~30 seconds
+
+---
+
+## 🔭 Roadmap
+
+- [x] Milestone 1 — Auth, employee mgmt, activity monitoring, real data ingestion
+- [x] Milestone 2 — Behavioral profiling, anomaly detection, threat models
+- [x] Milestone 3 — Risk scoring, UEBA pipeline, investigation workflows
+- [x] **ML anomaly detection (Isolation Forest)**
+- [ ] PDF/Excel report export
+- [ ] Automated tests (pytest)
+- [ ] Docker image for the app + CI/CD (GitHub Actions)
+- [ ] Notification & escalation (email/webhook)
+
+---
+
+## ⚠️ Disclaimer
+
+Built for research & educational purposes. The CERT dataset contains simulated (realistic but fictional) employee activity. Do not use for production security decisions without proper validation.
