@@ -172,6 +172,22 @@ npm run dev                   # http://localhost:5173
 
 ---
 
+## 🧪 Testing
+
+29 automated tests cover the core engine and API workflows (run against a dedicated `itbis_test` PostgreSQL database):
+
+*   **Auth & RBAC** — registration, login, token auth, role restrictions (403s)
+*   **Anomaly detection** — rule-based off-hours exfiltration, quiet-user negatives, threat scoring
+*   **Risk scoring** — score persistence, engine-score replacement, analytics
+*   **ML engine** — Isolation Forest flags seeded insiders, no-activity exclusion, 0-100 range
+*   **Report export** — valid PDF/Excel magic bytes for org & employee reports
+*   **API workflows** — employee CRUD, bulk activity ingestion, alert escalation, dashboard stats
+
+```bash
+# requires Docker Compose services running (PostgreSQL :5433)
+venv/bin/python -m pytest
+```
+
 ## 📈 Performance Notes
 
 - Behavioral baseline peer-comparison uses SQL aggregation — whole-org baseline computation runs in minutes even at **1,000 employees / 4.37M events**
@@ -186,7 +202,7 @@ npm run dev                   # http://localhost:5173
 - [x] Milestone 3 — Risk scoring, UEBA pipeline, investigation workflows
 - [x] **ML anomaly detection (Isolation Forest)**
 - [x] PDF/Excel report export (reportlab + openpyxl, download buttons on Anomaly Reports page)
-- [ ] Automated tests (pytest)
+- [x] Automated tests (pytest — 29 tests across auth, engines, exports, API)
 - [ ] Docker image for the app + CI/CD (GitHub Actions)
 - [ ] Notification & escalation (email/webhook)
 
