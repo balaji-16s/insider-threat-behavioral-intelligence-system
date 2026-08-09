@@ -39,7 +39,7 @@ Built with **FastAPI** + **React**, running on the **real CERT Insider Threat Te
 
 ### 📊 Dashboards & Reports
 - SOC dashboard (org risk trend, top insider threats, recent alerts, activity trends)
-- 12 frontend pages: Dashboard, Employees, Activity Logs, UEBA Intelligence, Anomaly Detection (+ML tab), Behavioral Analysis, Alerts, Incidents, Risk Scores, Anomaly Reports, Login
+- **13 frontend pages**: Login, Dashboard, Employees, Employee Detail, Activity Logs, UEBA Intelligence, Anomaly Detection (+ML tab), Behavioral Analysis, Alerts, Incidents, Incident Detail, Risk Scores, Anomaly Reports
 
 ---
 
@@ -94,7 +94,7 @@ python scripts/ingest_cert.py --all --max-users 200   # smaller subset
 │   ├── schemas/           # Pydantic request/response models
 │   ├── services/          # auth, behavioral_profiling, anomaly_detection,
 │   │                      #   ml_anomaly_detection, threat_detection, risk_scoring,
-│   │                      #   ueba, report_service
+│   │                      #   ueba, report_service, report_export (PDF/Excel)
 │   └── main.py            # FastAPI app entrypoint
 ├── frontend/src/
 │   ├── pages/             # 13 pages (Dashboard … IncidentDetail)
