@@ -40,12 +40,24 @@ def assess_employee_threat(
     db: Session, employee_id: str, days: int = 30
 ) -> dict[str, Any]:
     """Run all threat models for one employee and produce a consolidated score."""
+    # Load the employee's activity once and share it across all models to
+    # avoid 5x redundant queries (important when scoring 1000 employees).
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    logs = (
+        db.query(ActivityLog)
+        .filter(
+            ActivityLog.employee_id == employee_id,
+            ActivityLog.occurred_at >= cutoff,
+        )
+        .all()
+    )
+
     models = {
-        "data_exfiltration": _data_exfiltration_score(db, employee_id, days),
-        "off_hours_access": _off_hours_access_score(db, employee_id, days),
-        "privilege_abuse": _privilege_abuse_score(db, employee_id, days),
-        "policy_violation": _policy_violation_score(db, employee_id, days),
-        "behavioral_deviation": _behavioral_deviation_score(db, employee_id, days),
+        "data_exfiltration": _data_exfiltration_score(db, employee_id, days, logs=logs),
+        "off_hours_access": _off_hours_access_score(db, employee_id, days, logs=logs),
+        "privilege_abuse": _privilege_abuse_score(db, employee_id, days, logs=logs),
+        "policy_violation": _policy_violation_score(db, employee_id, days, logs=logs),
+        "behavioral_deviation": _behavioral_deviation_score(db, employee_id, days, logs=logs),
     }
 
     raw_score = sum(
@@ -96,7 +108,10 @@ def get_top_threats(
 
 
 def _data_exfiltration_score(
-    db: Session, employee_id: str, days: int
+    db: Session,
+    employee_id: str,
+    days: int,
+    logs: list[ActivityLog] | None = None,
 ) -> dict[str, Any]:
     """
     Data exfiltration threat model.
@@ -107,15 +122,16 @@ def _data_exfiltration_score(
     - Transfers during off-hours
     - Large file downloads prior to transfers
     """
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    logs = (
-        db.query(ActivityLog)
-        .filter(
-            ActivityLog.employee_id == employee_id,
-            ActivityLog.occurred_at >= cutoff,
+    if logs is None:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        logs = (
+            db.query(ActivityLog)
+            .filter(
+                ActivityLog.employee_id == employee_id,
+                ActivityLog.occurred_at >= cutoff,
+            )
+            .all()
         )
-        .all()
-    )
 
     data_xfers = [
         l for l in logs if l.activity_type == ActivityType.DATA_TRANSFER
@@ -202,7 +218,10 @@ def _data_exfiltration_score(
 
 
 def _off_hours_access_score(
-    db: Session, employee_id: str, days: int
+    db: Session,
+    employee_id: str,
+    days: int,
+    logs: list[ActivityLog] | None = None,
 ) -> dict[str, Any]:
     """
     Off-hours access threat model.
@@ -213,15 +232,16 @@ def _off_hours_access_score(
     - Weekend logins
     - Holiday patterns
     """
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    logs = (
-        db.query(ActivityLog)
-        .filter(
-            ActivityLog.employee_id == employee_id,
-            ActivityLog.occurred_at >= cutoff,
+    if logs is None:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        logs = (
+            db.query(ActivityLog)
+            .filter(
+                ActivityLog.employee_id == employee_id,
+                ActivityLog.occurred_at >= cutoff,
+            )
+            .all()
         )
-        .all()
-    )
 
     score = 0.0
     factors: dict[str, Any] = {}
@@ -269,7 +289,10 @@ def _off_hours_access_score(
 
 
 def _privilege_abuse_score(
-    db: Session, employee_id: str, days: int
+    db: Session,
+    employee_id: str,
+    days: int,
+    logs: list[ActivityLog] | None = None,
 ) -> dict[str, Any]:
     """
     Privilege abuse threat model.
@@ -279,15 +302,16 @@ def _privilege_abuse_score(
     - Access to sensitive systems outside normal pattern
     - Unauthorized access attempts
     """
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    logs = (
-        db.query(ActivityLog)
-        .filter(
-            ActivityLog.employee_id == employee_id,
-            ActivityLog.occurred_at >= cutoff,
+    if logs is None:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        logs = (
+            db.query(ActivityLog)
+            .filter(
+                ActivityLog.employee_id == employee_id,
+                ActivityLog.occurred_at >= cutoff,
+            )
+            .all()
         )
-        .all()
-    )
 
     score = 0.0
     factors: dict[str, Any] = {}
@@ -333,7 +357,10 @@ def _privilege_abuse_score(
 
 
 def _policy_violation_score(
-    db: Session, employee_id: str, days: int
+    db: Session,
+    employee_id: str,
+    days: int,
+    logs: list[ActivityLog] | None = None,
 ) -> dict[str, Any]:
     """
     Policy violation threat model.
@@ -343,15 +370,16 @@ def _policy_violation_score(
     - Login failures
     - Data transfers to removable media
     """
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    logs = (
-        db.query(ActivityLog)
-        .filter(
-            ActivityLog.employee_id == employee_id,
-            ActivityLog.occurred_at >= cutoff,
+    if logs is None:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        logs = (
+            db.query(ActivityLog)
+            .filter(
+                ActivityLog.employee_id == employee_id,
+                ActivityLog.occurred_at >= cutoff,
+            )
+            .all()
         )
-        .all()
-    )
 
     score = 0.0
     factors: dict[str, Any] = {}
@@ -394,7 +422,10 @@ def _policy_violation_score(
 
 
 def _behavioral_deviation_score(
-    db: Session, employee_id: str, days: int
+    db: Session,
+    employee_id: str,
+    days: int,
+    logs: list[ActivityLog] | None = None,
 ) -> dict[str, Any]:
     """
     Behavioral deviation threat model.
@@ -410,15 +441,18 @@ def _behavioral_deviation_score(
             "factors": {"error": "No baseline available"},
         }
 
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    recent_logs = (
-        db.query(ActivityLog)
-        .filter(
-            ActivityLog.employee_id == employee_id,
-            ActivityLog.occurred_at >= cutoff,
+    if logs is None:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        recent_logs = (
+            db.query(ActivityLog)
+            .filter(
+                ActivityLog.employee_id == employee_id,
+                ActivityLog.occurred_at >= cutoff,
+            )
+            .all()
         )
-        .all()
-    )
+    else:
+        recent_logs = logs
 
     score = 0.0
     factors: dict[str, Any] = {}

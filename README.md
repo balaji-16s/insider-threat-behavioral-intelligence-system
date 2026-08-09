@@ -167,7 +167,7 @@ npm run dev                   # http://localhost:5173
 | UEBA | `POST /api/v1/ueba/pipeline` · `GET /api/v1/ueba/overview` · `GET /api/v1/ueba/overview/{employee_id}` |
 | Alerts | `GET/POST /api/v1/alerts` · `PATCH /api/v1/alerts/{id}` · `POST /api/v1/alerts/{id}/escalate` |
 | Incidents | `GET/POST /api/v1/incidents` · `PATCH /api/v1/incidents/{id}` · `POST /api/v1/incidents/{id}/timeline` · `GET /api/v1/incidents/{id}/related-alerts` |
-| Reports | `GET /api/v1/reports/anomaly` · `GET /api/v1/reports/employee/{employee_id}` |
+| Reports | `GET /api/v1/reports/anomaly` · `GET /api/v1/reports/employee/{employee_id}` · **PDF/Excel export**: `/anomaly/pdf` · `/anomaly/xlsx` · `/employee/{id}/pdf` · `/employee/{id}/xlsx` |
 | Dashboard | `GET /api/v1/dashboard/stats` · `GET /api/v1/dashboard/recent-alerts` · `GET /api/v1/dashboard/activity-trends` |
 
 ---
@@ -185,7 +185,7 @@ npm run dev                   # http://localhost:5173
 - [x] Milestone 2 — Behavioral profiling, anomaly detection, threat models
 - [x] Milestone 3 — Risk scoring, UEBA pipeline, investigation workflows
 - [x] **ML anomaly detection (Isolation Forest)**
-- [ ] PDF/Excel report export
+- [x] PDF/Excel report export (reportlab + openpyxl, download buttons on Anomaly Reports page)
 - [ ] Automated tests (pytest)
 - [ ] Docker image for the app + CI/CD (GitHub Actions)
 - [ ] Notification & escalation (email/webhook)

@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import {
   getAnomalyReport,
   getEmployeeReport,
+  downloadAnomalyReport,
+  downloadEmployeeReport,
   type AnomalyReport,
   type EmployeeReport,
 } from '../api/reports';
@@ -20,6 +22,8 @@ import {
   Search,
   Target,
   CheckCircle,
+  FileDown,
+  FileSpreadsheet,
 } from 'lucide-react';
 
 const riskColors: Record<string, string> = {
@@ -132,7 +136,7 @@ export default function AnomalyReports() {
         <div className="space-y-6">
           {/* Report header */}
           <div className="bg-surface-900 rounded-xl border border-surface-800 p-6">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
               <div className="flex items-center gap-3">
                 <FileText className="w-6 h-6 text-cyber-400" />
                 <div>
@@ -142,6 +146,22 @@ export default function AnomalyReports() {
                     {' '}&bull; Period: {report.report_period_days} days
                   </p>
                 </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => downloadAnomalyReport('pdf', report.report_period_days)}
+                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-danger-500/10 border border-danger-500/30
+                    text-danger-400 text-sm font-medium hover:bg-danger-500/20 transition-all"
+                >
+                  <FileDown className="w-4 h-4" /> PDF
+                </button>
+                <button
+                  onClick={() => downloadAnomalyReport('xlsx', report.report_period_days)}
+                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-matrix-500/10 border border-matrix-500/30
+                    text-matrix-400 text-sm font-medium hover:bg-matrix-500/20 transition-all"
+                >
+                  <FileSpreadsheet className="w-4 h-4" /> Excel
+                </button>
               </div>
             </div>
 
@@ -447,7 +467,25 @@ export default function AnomalyReports() {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {/* Employee Info */}
               <div className="bg-surface-900 rounded-xl border border-surface-800 p-6">
-                <h3 className="text-lg font-semibold text-white mb-4">Employee Report</h3>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-white">Employee Report</h3>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => downloadEmployeeReport(selectedEmployee, 'pdf', 30)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-danger-500/10 border border-danger-500/30
+                        text-danger-400 text-xs font-medium hover:bg-danger-500/20 transition-all"
+                    >
+                      <FileDown className="w-3.5 h-3.5" /> PDF
+                    </button>
+                    <button
+                      onClick={() => downloadEmployeeReport(selectedEmployee, 'xlsx', 30)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-matrix-500/10 border border-matrix-500/30
+                        text-matrix-400 text-xs font-medium hover:bg-matrix-500/20 transition-all"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" /> Excel
+                    </button>
+                  </div>
+                </div>
                 <div className="flex items-center gap-4 mb-6">
                   <div className="w-12 h-12 rounded-full bg-cyber-500/10 flex items-center justify-center">
                     <span className="text-lg font-bold text-cyber-400">

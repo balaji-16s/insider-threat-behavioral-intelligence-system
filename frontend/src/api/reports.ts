@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api, downloadFile } from './client';
 
 export interface AnomalyReport {
   generated_at: string;
@@ -70,4 +70,18 @@ export async function getAnomalyReport(days = 30, includeThreats = true): Promis
 
 export async function getEmployeeReport(employeeId: string, days = 30): Promise<EmployeeReport> {
   return api.get<EmployeeReport>(`/reports/employee/${employeeId}?days=${days}`);
+}
+
+export async function downloadAnomalyReport(format: 'pdf' | 'xlsx', days = 30): Promise<void> {
+  const filename = `itbis_anomaly_report_${days}d.${format}`;
+  return downloadFile(`/reports/anomaly/${format}?days=${days}`, filename);
+}
+
+export async function downloadEmployeeReport(
+  employeeId: string,
+  format: 'pdf' | 'xlsx',
+  days = 30
+): Promise<void> {
+  const filename = `itbis_employee_report.${format}`;
+  return downloadFile(`/reports/employee/${employeeId}/${format}?days=${days}`, filename);
 }
