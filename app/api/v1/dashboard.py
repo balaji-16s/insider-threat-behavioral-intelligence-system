@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -73,13 +75,20 @@ def get_activity_trends(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    from datetime import timedelta
     from sqlalchemy import cast, Date
+
+    # Bound the aggregation to the last 30 days (the widget only renders 30
+    # points anyway) so this doesn't scan the entire activity_logs table
+    # (millions of rows) on every dashboard load.
+    cutoff = datetime.utcnow() - timedelta(days=30)
 
     daily_counts = (
         db.query(
             cast(ActivityLog.occurred_at, Date).label("date"),
             func.count(ActivityLog.id).label("count"),
         )
+        .filter(ActivityLog.occurred_at >= cutoff)
         .group_by(cast(ActivityLog.occurred_at, Date))
         .order_by(cast(ActivityLog.occurred_at, Date).desc())
         .limit(30)

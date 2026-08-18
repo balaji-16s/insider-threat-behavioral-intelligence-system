@@ -7,6 +7,7 @@ interface AuthState {
   isLoading: boolean;
   user: { email: string; role: string } | null;
   login: (credentials: LoginCredentials) => Promise<void>;
+  loginWithToken: (token: string) => void;
   register: (data: UserCreate) => Promise<void>;
   logout: () => void;
 }
@@ -34,7 +35,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (credentials: LoginCredentials) => {
     const data = await apiLogin(credentials);
-    const payload = JSON.parse(atob(data.access_token.split('.')[1]));
+    loginWithToken(data.access_token);
+  }, []);
+
+  // Used by the Google OAuth callback: store an externally-issued JWT
+  // (from /auth/google/callback) and mark the session authenticated.
+  const loginWithToken = useCallback((token: string) => {
+    setToken(token);
+    const payload = JSON.parse(atob(token.split('.')[1]));
     setUser({ email: payload.sub, role: payload.role });
     setIsAuthenticated(true);
   }, []);
@@ -50,7 +58,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, isLoading, user, login, register, logout }}>
+    <AuthContext.Provider value={{ isAuthenticated, isLoading, user, login, loginWithToken, register, logout }}>
       {children}
     </AuthContext.Provider>
   );

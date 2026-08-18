@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api, LONG_REQUEST_TIMEOUT_MS } from './client';
 
 export interface AnomalyDetectionRequest {
   employee_id?: string;
@@ -24,6 +24,7 @@ export interface AnomalyDetectionResult {
   employees_with_anomalies: number;
   alerts_created: number;
   details: EmployeeAnomalies[];
+  generated_at?: string | null;
 }
 
 export interface AnomalySummaryItem {
@@ -107,16 +108,37 @@ export interface MlDetectionResult {
   average_ml_score: number;
   top_flagged: MlEmployeeScore[];
   ground_truth?: MlGroundTruthCheck | null;
+  model_trained_at?: string | null;
   generated_at: string;
   message: string;
 }
 
 export async function detectAnomalies(req: AnomalyDetectionRequest): Promise<AnomalyDetectionResult> {
-  return api.post<AnomalyDetectionResult>('/anomaly/detect', req);
+  return api.post<AnomalyDetectionResult>('/anomaly/detect', req, LONG_REQUEST_TIMEOUT_MS);
 }
 
-export async function runMlDetection(days = 30, contamination = 0.05): Promise<MlDetectionResult> {
-  return api.post<MlDetectionResult>(`/anomaly/ml/detect?days=${days}&contamination=${contamination}`);
+export async function getLatestDetection(): Promise<AnomalyDetectionResult | null> {
+  return api.get<AnomalyDetectionResult | null>('/anomaly/detect/latest');
+}
+
+export async function getAnomalyStats(): Promise<{ total_open: number; by_severity: Record<string, number> }> {
+  return api.get('/anomaly/alerts/stats');
+}
+
+export async function runMlDetection(days = 30, contamination = 0.05, retrain = false): Promise<MlDetectionResult> {
+  return api.post<MlDetectionResult>(
+    `/anomaly/ml/detect?days=${days}&contamination=${contamination}&retrain=${retrain}`,
+    undefined,
+    LONG_REQUEST_TIMEOUT_MS
+  );
+}
+
+export async function trainMlModel(days = 30, contamination = 0.05): Promise<MlDetectionResult> {
+  return api.post<MlDetectionResult>(
+    `/anomaly/ml/train?days=${days}&contamination=${contamination}`,
+    undefined,
+    LONG_REQUEST_TIMEOUT_MS
+  );
 }
 
 export async function getMlResults(): Promise<MlDetectionResult | null> {

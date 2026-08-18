@@ -9,6 +9,12 @@ This is the AI/ML layer of the platform: it complements the statistical
 and rule-based engine in ``anomaly_detection.py`` with a genuine
 unsupervised machine-learning model (scikit-learn).
 
+The model is trained once on the ingested dataset (see
+``scripts/train_ml_model.py`` or ``POST /api/v1/anomaly/ml/train``) and
+persisted to ``data/models/``. Scoring then loads the trained model for
+inference instead of re-fitting on every run, which keeps whole-org
+detection fast on the large CERT dataset.
+
 Features are extracted from the last ``days`` of activity for every
 employee (volume, timing, device, and baseline-deviation signals), then
 an Isolation Forest flags the most anomalous employees. Each result
@@ -18,12 +24,13 @@ includes an explainable breakdown of the top deviating features.
 from __future__ import annotations
 
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import mean, median, stdev
 from typing import Any
 
+import joblib
 import numpy as np
 from sklearn.ensemble import IsolationForest
 from sqlalchemy.orm import Session
@@ -38,6 +45,12 @@ MODEL_VERSION = "v1"
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 RESULTS_CACHE = DATA_DIR / "ml_results.json"
 INSIDERS_JSON = DATA_DIR / "cert" / "insiders.json"
+
+# Persisted trained model: produced by scripts/train_ml_model.py (or the
+# /anomaly/ml/train endpoint) and loaded for inference at scoring time.
+MODEL_DIR = DATA_DIR / "models"
+MODEL_PATH = MODEL_DIR / "isolation_forest.joblib"
+MODEL_META_PATH = MODEL_DIR / "isolation_forest_meta.json"
 
 # Feature vector columns (order matters — keep in sync with _extract_features)
 FEATURES = [
@@ -65,38 +78,20 @@ def run_ml_anomaly_detection(
     db: Session,
     days: int = 30,
     contamination: float = 0.05,
+    retrain: bool = False,
 ) -> dict[str, Any]:
     """
     Run the ML anomaly detection pipeline for all employees.
+
+    Scores with the persisted trained model (see ``scripts/train_ml_model.py``);
+    the model is only re-fitted when ``retrain`` is set, none is saved yet,
+    or the caller requests a different contamination.
 
     Returns scored results (0-100 risk), isolation-forest outlier flags,
     per-employee explainability, and a ground-truth validation summary.
     """
     employees = db.query(Employee).all()
-    baselines = {
-        b.employee_id: b.baseline_data or {}
-        for b in db.query(BehavioralBaseline).all()
-    }
-
-    records: list[dict[str, Any]] = []
-    no_activity = 0
-    for emp in employees:
-        feats = _extract_features(db, str(emp.id), days, baselines.get(emp.id, {}))
-        if feats is None:
-            # No behavioral data in the window — nothing to judge, so
-            # exclude from model scoring to avoid all-zero false positives.
-            no_activity += 1
-            continue
-        records.append(
-            {
-                "employee_id": str(emp.id),
-                "employee_code": emp.employee_code,
-                "employee_name": emp.full_name,
-                "department": emp.department,
-                "designation": emp.designation,
-                "features": feats,
-            }
-        )
+    records, no_activity = _build_feature_records(db, employees, days)
 
     if not records:
         return {
@@ -110,6 +105,7 @@ def run_ml_anomaly_detection(
             "average_ml_score": 0.0,
             "top_flagged": [],
             "ground_truth": None,
+            "model_trained_at": None,
             "generated_at": datetime.utcnow().isoformat(),
             "message": "No employees to analyze",
         }
@@ -119,13 +115,18 @@ def run_ml_anomaly_detection(
     )
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
-    model = IsolationForest(
-        n_estimators=200,
-        contamination=contamination,
-        random_state=42,
-        n_jobs=-1,
-    )
-    model.fit(X)
+    model, meta = None, None
+    if not retrain:
+        model, meta = load_trained_model()
+        if meta is not None and abs(
+            meta.get("contamination", -1.0) - contamination
+        ) > 1e-6:
+            model, meta = None, None  # trained for a different contamination
+    if model is None:
+        model, meta = _fit_and_save_model(
+            X, records, days, contamination, no_activity
+        )
+
     predictions = model.predict(X)  # -1 = outlier, 1 = inlier
     raw_scores = model.decision_function(X)
     ml_scores = _normalize_scores(raw_scores)
@@ -166,6 +167,7 @@ def run_ml_anomaly_detection(
         ),
         "top_flagged": items[:25],
         "ground_truth": _ground_truth_check(items),
+        "model_trained_at": (meta or {}).get("trained_at"),
         "generated_at": datetime.utcnow().isoformat(),
         "message": (
             f"Isolation Forest flagged {len(outliers)}/{len(items)} employees "
@@ -182,6 +184,172 @@ def run_ml_anomaly_detection(
     return result
 
 
+def train_and_save_model(
+    db: Session,
+    days: int = 30,
+    contamination: float = 0.05,
+    max_users: int | None = None,
+) -> dict[str, Any]:
+    """
+    Train the Isolation Forest on the current dataset and persist it.
+
+    Offline-training entry point used by ``scripts/train_ml_model.py`` and
+    the ``POST /api/v1/anomaly/ml/train`` endpoint. After this runs,
+    ``run_ml_anomaly_detection`` scores with the saved model instead of
+    re-fitting on every call.
+    """
+    employees = db.query(Employee).all()
+    if max_users:
+        employees = employees[:max_users]
+
+    records, no_activity = _build_feature_records(db, employees, days)
+    if not records:
+        return {
+            "trained": False,
+            "reason": "No employees with activity in the lookback window",
+            "samples": 0,
+            "no_activity": no_activity,
+        }
+
+    X = np.array(
+        [[r["features"][f] for f in FEATURES] for r in records], dtype=float
+    )
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+    model, meta = _fit_and_save_model(
+        X, records, days, contamination, no_activity
+    )
+
+    return {
+        "trained": True,
+        "model": MODEL_NAME,
+        "version": MODEL_VERSION,
+        "contamination": contamination,
+        "lookback_days": days,
+        "samples": len(records),
+        "no_activity": no_activity,
+        "trained_at": meta["trained_at"],
+        "model_path": str(MODEL_PATH),
+    }
+
+
+def _build_feature_records(
+    db: Session,
+    employees: list[Employee],
+    days: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    Load activity for all employees (chunked ``IN(...)`` queries, memory
+    bounded) and extract feature vectors.
+
+    Returns ``(records, no_activity)`` where each record carries the
+    employee metadata plus their feature vector.
+    """
+    baselines = {
+        b.employee_id: b.baseline_data or {}
+        for b in db.query(BehavioralBaseline).all()
+    }
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    records: list[dict[str, Any]] = []
+    no_activity = 0
+    # Load activity in small chunks (one query per chunk) instead of one
+    # query per employee, which previously made feature extraction fire
+    # 1,000+ queries on large datasets.
+    for chunk in _chunks(employees, 20):
+        logs_by_employee: dict[str, list[Any]] = defaultdict(list)
+        for log in (
+            db.query(
+                ActivityLog.employee_id,
+                ActivityLog.activity_type,
+                ActivityLog.occurred_at,
+                ActivityLog.details,
+            )
+            .filter(
+                ActivityLog.employee_id.in_([e.id for e in chunk]),
+                ActivityLog.occurred_at >= cutoff,
+            )
+            .all()
+        ):
+            logs_by_employee[str(log.employee_id)].append(log)
+
+        for emp in chunk:
+            feats = _extract_features(
+                logs_by_employee.get(str(emp.id), []),
+                days,
+                baselines.get(emp.id, {}),
+            )
+            if feats is None:
+                # No behavioral data in the window — nothing to judge, so
+                # exclude from model scoring to avoid all-zero false positives.
+                no_activity += 1
+                continue
+            records.append(
+                {
+                    "employee_id": str(emp.id),
+                    "employee_code": emp.employee_code,
+                    "employee_name": emp.full_name,
+                    "department": emp.department,
+                    "designation": emp.designation,
+                    "features": feats,
+                }
+            )
+    return records, no_activity
+
+
+def _fit_and_save_model(
+    X: np.ndarray,
+    records: list[dict[str, Any]],
+    days: int,
+    contamination: float,
+    no_activity: int,
+) -> tuple[Any, dict[str, Any]]:
+    """Fit a fresh Isolation Forest on ``X`` and persist it to disk."""
+    model = IsolationForest(
+        n_estimators=200,
+        contamination=contamination,
+        random_state=42,
+        n_jobs=-1,
+    )
+    model.fit(X)
+    meta = _save_model(model, {
+        "model": MODEL_NAME,
+        "version": MODEL_VERSION,
+        "contamination": contamination,
+        "lookback_days": days,
+        "trained_at": datetime.utcnow().isoformat(),
+        "feature_names": FEATURES,
+        "samples": len(records),
+        "employees_no_activity": no_activity,
+    })
+    return model, meta
+
+
+def load_trained_model() -> tuple[Any, dict[str, Any] | None]:
+    """Load the persisted trained model + metadata, or ``(None, None)``."""
+    if not MODEL_PATH.exists() or not MODEL_META_PATH.exists():
+        return None, None
+    try:
+        model = joblib.load(MODEL_PATH)
+        meta = json.loads(MODEL_META_PATH.read_text())
+        return model, meta
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None, None
+
+
+def _save_model(
+    model: Any, meta: dict[str, Any]
+) -> dict[str, Any]:
+    """Persist a fitted model + metadata to ``data/models`` (best-effort)."""
+    try:
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        joblib.dump(model, MODEL_PATH)
+        MODEL_META_PATH.write_text(json.dumps(meta, indent=2))
+    except OSError:
+        pass  # persistence is best-effort; scoring still works in-memory
+    return meta
+
+
 def get_cached_ml_results() -> dict[str, Any] | None:
     """Return the most recent ML detection run (None if never run)."""
     if not RESULTS_CACHE.exists():
@@ -196,19 +364,13 @@ def get_cached_ml_results() -> dict[str, Any] | None:
 
 
 def _extract_features(
-    db: Session, employee_id: str, days: int, baseline: dict[str, Any]
+    logs: list[Any], days: int, baseline: dict[str, Any]
 ) -> dict[str, float] | None:
-    """Build a behavioral feature vector for one employee over the window."""
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    logs = (
-        db.query(ActivityLog)
-        .filter(
-            ActivityLog.employee_id == employee_id,
-            ActivityLog.occurred_at >= cutoff,
-        )
-        .all()
-    )
+    """Build a behavioral feature vector for one employee over the window.
 
+    ``logs`` must already be scoped to the employee and the lookback window
+    (callers batch-load them).
+    """
     if not logs:
         return None
 
@@ -276,6 +438,11 @@ def _extract_features(
         "avg_data_per_day": round(xfer_total / max(days, 1), 3),
         "baseline_deviation": round(baseline_deviation, 3),
     }
+
+
+def _chunks(items: list[Any], size: int) -> list[list[Any]]:
+    """Split a list into consecutive chunks of at most ``size`` items."""
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 # ── Scoring & explainability ────────────────────────────────────

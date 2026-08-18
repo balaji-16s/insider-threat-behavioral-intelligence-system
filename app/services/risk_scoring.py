@@ -19,11 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.models.employee import Employee
 from app.models.risk_score import RiskScore, RiskLevel
-from app.services.threat_detection import (
-    assess_all_employees,
-    assess_employee_threat,
-    WEIGHTS,
-)
+from app.services.threat_detection import assess_employees_batch
 
 # Marker stored in the breakdown so engine-generated scores can be
 # refreshed on recalculation while preserving the historical baseline.
@@ -57,13 +53,20 @@ def calculate_risk_scores(
             RiskScore.breakdown.op("->>")("engine") == ENGINE_TAG,
         ).delete(synchronize_session=False)
 
+    # Run the full threat models in one batched pass (chunked IN(...)
+    # activity loading) instead of firing a per-employee query chain,
+    # which previously made whole-org recalculations slow on large datasets.
+    assessments = assess_employees_batch(
+        db, [str(emp.id) for emp in employees], days
+    )
+
     created = 0
     latest: dict[str, dict[str, Any]] = {}
+    calculated_at = datetime.utcnow()
 
     for emp in employees:
-        try:
-            result = assess_employee_threat(db, str(emp.id), days)
-        except Exception:
+        result = assessments.get(str(emp.id))
+        if result is None:
             continue
 
         score = round(result["threat_score"], 1)
@@ -89,7 +92,7 @@ def calculate_risk_scores(
                 score=score,
                 risk_level=level,
                 breakdown=breakdown,
-                calculated_at=datetime.utcnow(),
+                calculated_at=calculated_at,
             )
         )
         created += 1

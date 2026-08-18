@@ -1,7 +1,7 @@
 import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import Column, Float, DateTime, Enum, ForeignKey, JSON
+from sqlalchemy import Column, Index, Float, DateTime, Enum, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.base import Base
 
@@ -13,6 +13,10 @@ class RiskLevel(str, enum.Enum):
 
 class RiskScore(Base):
     __tablename__ = "risk_scores"
+    __table_args__ = (
+        # Hot pattern: DISTINCT ON (employee_id) latest-score lookups.
+        Index("ix_risk_scores_employee_calculated", "employee_id", "calculated_at"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     employee_id = Column(UUID(as_uuid=True), ForeignKey("employees.id"), nullable=False, index=True)

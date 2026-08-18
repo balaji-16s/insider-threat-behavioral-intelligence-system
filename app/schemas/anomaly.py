@@ -32,6 +32,7 @@ class AnomalyDetectionResult(BaseModel):
     employees_with_anomalies: int
     alerts_created: int
     details: list[EmployeeAnomalies]
+    generated_at: str | None = None
 
 
 class AnomalySummaryItem(BaseModel):
@@ -149,6 +150,7 @@ class MlGroundTruthCheck(BaseModel):
 
 
 class MlDetectionResult(BaseModel):
+    model_config = {"protected_namespaces": ()}
     model: str
     version: str
     contamination: float
@@ -159,5 +161,6 @@ class MlDetectionResult(BaseModel):
     average_ml_score: float
     top_flagged: list[MlEmployeeScore]
     ground_truth: MlGroundTruthCheck | None = None
+    model_trained_at: str | None = None
     generated_at: str
     message: str

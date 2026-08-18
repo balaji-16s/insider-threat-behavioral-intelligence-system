@@ -8,12 +8,15 @@ alert generation.
 
 from __future__ import annotations
 
+import json
 import math
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from statistics import mean, stdev, median
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.employee import Employee
@@ -21,6 +24,64 @@ from app.models.activity_log import ActivityLog, ActivityType
 from app.models.alert import Alert, AlertSeverity, AlertStatus
 from app.models.risk_score import RiskScore, RiskLevel
 from app.services.behavioral_profiling import compute_baseline
+from app.services.notification_service import notify_threat_alert
+
+
+
+# ── Result cache ────────────────────────────────────────────────
+
+DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+DETECTION_CACHE = DATA_DIR / "detection_results.json"
+
+
+def _cache_detection_result(result: dict[str, Any]) -> None:
+    """Persist the last detection run (best-effort) so the UI can restore
+    the summary/details after navigating away and back."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        DETECTION_CACHE.write_text(
+            json.dumps(_sanitize_for_cache(result), indent=2)
+        )
+    except OSError:
+        pass
+
+
+def _sanitize_for_cache(result: dict[str, Any]) -> dict[str, Any]:
+    """Convert enum severity values to plain strings for JSON serialization."""
+    for emp in result.get("details", []):
+        for anomaly in emp.get("anomalies", []):
+            sev = anomaly.get("severity")
+            if isinstance(sev, AlertSeverity):
+                anomaly["severity"] = sev.value
+    return result
+
+
+def get_cached_detection_results() -> dict[str, Any] | None:
+    """Return the most recent anomaly detection run (None if never run)."""
+    if not DETECTION_CACHE.exists():
+        return None
+    try:
+        return json.loads(DETECTION_CACHE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def get_anomaly_stats(db: Session) -> dict[str, Any]:
+    """Aggregate open anomaly alerts (real totals, not a capped list)."""
+    rows = (
+        db.query(Alert.severity, func.count(Alert.id))
+        .filter(
+            Alert.status == AlertStatus.OPEN,
+            Alert.anomaly_type.isnot(None),
+        )
+        .group_by(Alert.severity)
+        .all()
+    )
+    by_severity = {sev.value: count for sev, count in rows}
+    return {
+        "total_open": sum(by_severity.values()),
+        "by_severity": by_severity,
+    }
 
 
 # ── Public API ──────────────────────────────────────────────────
@@ -36,7 +97,14 @@ def run_anomaly_detection(
 
     Optionally scope to a single employee; otherwise runs for all.
     Returns a summary of what was detected.
+
+    Activity logs are loaded in small chunks with ``IN(...)`` queries and
+    shared across every detection method (statistical, rule-based,
+    temporal) instead of firing one query per method per employee, which
+    keeps whole-org scans fast and memory-bounded on large datasets.
     """
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
     if employee_id:
         employees = (
             db.query(Employee).filter(Employee.id == employee_id).all()
@@ -47,25 +115,74 @@ def run_anomaly_detection(
     results: list[dict[str, Any]] = []
     alerts_created = 0
 
-    for emp in employees:
-        anomalies = _detect_anomalies(db, str(emp.id), days)
-        if anomalies:
-            results.append(
-                {
-                    "employee_id": str(emp.id),
-                    "employee_name": emp.full_name,
-                    "anomalies": anomalies,
-                }
-            )
-            # Generate alerts for high-confidence anomalies
-            alerts_created += _generate_alerts(db, emp, anomalies)
+    for chunk in _chunks(employees, 20):
+        chunk_ids = [e.id for e in chunk]
 
-    return {
+        # One query per chunk: all activity for these employees in the window.
+        logs_by_employee: dict[str, list[Any]] = defaultdict(list)
+        for log in (
+            db.query(
+                ActivityLog.employee_id,
+                ActivityLog.activity_type,
+                ActivityLog.occurred_at,
+                ActivityLog.details,
+            )
+            .filter(
+                ActivityLog.employee_id.in_(chunk_ids),
+                ActivityLog.occurred_at >= cutoff,
+            )
+            .all()
+        ):
+            logs_by_employee[str(log.employee_id)].append(log)
+
+        # One query per chunk: existing open anomaly alerts for dedup.
+        existing_by_employee: dict[str, set[tuple[str, str]]] = defaultdict(set)
+        for emp_id, atype, title in (
+            db.query(Alert.employee_id, Alert.anomaly_type, Alert.title)
+            .filter(
+                Alert.employee_id.in_(chunk_ids),
+                Alert.status == AlertStatus.OPEN,
+                Alert.anomaly_type.isnot(None),
+            )
+            .all()
+        ):
+            if atype:
+                existing_by_employee[str(emp_id)].add((atype, title))
+
+        for emp in chunk:
+            anomalies = _detect_anomalies(
+                logs_by_employee.get(str(emp.id), []), days
+            )
+            if anomalies:
+                results.append(
+                    {
+                        "employee_id": str(emp.id),
+                        "employee_name": emp.full_name,
+                        "anomalies": anomalies,
+                    }
+                )
+                # Generate alerts for high-confidence anomalies
+                alerts_created += _generate_alerts(
+                    db,
+                    emp,
+                    anomalies,
+                    existing_by_employee.get(str(emp.id), set()),
+                )
+
+    result = {
         "scanned_employees": len(employees),
         "employees_with_anomalies": len(results),
         "alerts_created": alerts_created,
         "details": results,
+        "generated_at": datetime.utcnow().isoformat(),
     }
+    _cache_detection_result(result)
+    return result
+
+
+def _chunks(items: list[Any], size: int) -> list[list[Any]]:
+    """Split a list into consecutive chunks of at most ``size`` items."""
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 def get_anomaly_summary(
@@ -97,38 +214,22 @@ def get_anomaly_summary(
 
 
 def _detect_anomalies(
-    db: Session, employee_id: str, lookback_days: int
+    logs: list[Any], lookback_days: int
 ) -> list[dict[str, Any]]:
     """Run all detection methods and return a consolidated list."""
     anomalies: list[dict[str, Any]] = []
 
-    anomalies.extend(
-        _statistical_anomalies(db, employee_id, lookback_days)
-    )
-    anomalies.extend(
-        _rule_based_anomalies(db, employee_id, lookback_days)
-    )
-    anomalies.extend(
-        _temporal_anomalies(db, employee_id, lookback_days)
-    )
+    anomalies.extend(_statistical_anomalies(logs, lookback_days))
+    anomalies.extend(_rule_based_anomalies(logs, lookback_days))
+    anomalies.extend(_temporal_anomalies(logs, lookback_days))
 
     return anomalies
 
 
 def _statistical_anomalies(
-    db: Session, employee_id: str, days: int
+    logs: list[Any], days: int
 ) -> list[dict[str, Any]]:
     """Z-score and IQR based anomaly detection on activity volumes."""
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    logs = (
-        db.query(ActivityLog)
-        .filter(
-            ActivityLog.employee_id == employee_id,
-            ActivityLog.occurred_at >= cutoff,
-        )
-        .all()
-    )
-
     if len(logs) < 10:
         return []
 
@@ -193,19 +294,9 @@ def _statistical_anomalies(
 
 
 def _rule_based_anomalies(
-    db: Session, employee_id: str, days: int
+    logs: list[Any], days: int
 ) -> list[dict[str, Any]]:
     """Domain rule-based anomaly detection."""
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    logs = (
-        db.query(ActivityLog)
-        .filter(
-            ActivityLog.employee_id == employee_id,
-            ActivityLog.occurred_at >= cutoff,
-        )
-        .all()
-    )
-
     if not logs:
         return []
 
@@ -307,19 +398,9 @@ def _rule_based_anomalies(
 
 
 def _temporal_anomalies(
-    db: Session, employee_id: str, days: int
+    logs: list[Any], days: int
 ) -> list[dict[str, Any]]:
     """Time-pattern based anomalies (weekends, late night, irregular)."""
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    logs = (
-        db.query(ActivityLog)
-        .filter(
-            ActivityLog.employee_id == employee_id,
-            ActivityLog.occurred_at >= cutoff,
-        )
-        .all()
-    )
-
     if not logs:
         return []
 
@@ -376,6 +457,7 @@ def _generate_alerts(
     db: Session,
     employee: Employee,
     anomalies: list[dict[str, Any]],
+    existing: set[tuple[str, str]] | None = None,
 ) -> int:
     """
     Convert anomaly detections into database alerts.
@@ -383,23 +465,27 @@ def _generate_alerts(
     Deduplicates by checking for existing OPEN alerts with the same
     anomaly_type + title for the same employee. This prevents the
     pipeline from creating hundreds of duplicate alerts on re-runs.
+
+    ``existing`` may be passed in (preloaded in bulk by the caller) to
+    avoid a per-employee query; when omitted it is fetched here.
     """
     count = 0
 
-    # Fetch existing open alerts for this employee — build a set of
-    # (anomaly_type, title) pairs so we can deduplicate.
-    existing_rows = (
-        db.query(Alert.anomaly_type, Alert.title)
-        .filter(
-            Alert.employee_id == employee.id,
-            Alert.status == AlertStatus.OPEN,
-            Alert.anomaly_type.isnot(None),
+    if existing is None:
+        # Fetch existing open alerts for this employee — build a set of
+        # (anomaly_type, title) pairs so we can deduplicate.
+        existing_rows = (
+            db.query(Alert.anomaly_type, Alert.title)
+            .filter(
+                Alert.employee_id == employee.id,
+                Alert.status == AlertStatus.OPEN,
+                Alert.anomaly_type.isnot(None),
+            )
+            .all()
         )
-        .all()
-    )
-    existing: set[tuple[str, str]] = {
-        (row[0], row[1]) for row in existing_rows if row[0]
-    }
+        existing = {
+            (row[0], row[1]) for row in existing_rows if row[0]
+        }
 
     for anomaly in anomalies:
         anomaly_type = anomaly.get("type", "")
@@ -440,6 +526,20 @@ def _generate_alerts(
         count += 1
         # Track so sibling anomalies of the same type don't re-enter
         existing.add((anomaly_type, title))
+
+        if severity in (AlertSeverity.HIGH, AlertSeverity.CRITICAL):
+            try:
+                notify_threat_alert(
+                    db=db,
+                    alert_title=title,
+                    severity=severity.value,
+                    employee_name=employee.full_name,
+                    anomaly_type=anomaly_type,
+                    evidence=anomaly.get("evidence", {}),
+                )
+            except Exception:
+                pass
+
 
     if count > 0:
         db.commit()

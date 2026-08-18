@@ -79,6 +79,8 @@ export default function Dashboard() {
     load();
   }, []);
 
+  const [viewMode, setViewMode] = useState<'all' | 'soc' | 'manager' | 'admin'>('all');
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -98,27 +100,62 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-white">Security Dashboard</h1>
-        <p className="text-gray-500 mt-1">Real-time overview of insider threat intelligence</p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-white">Security Dashboard</h1>
+          <p className="text-gray-500 mt-1">Real-time overview of insider threat intelligence</p>
+        </div>
+        <div className="flex items-center gap-1 bg-surface-900 border border-surface-800 p-1 rounded-xl">
+          {[
+            { id: 'all', label: 'All Views' },
+            { id: 'soc', label: 'SOC Engineer' },
+            { id: 'manager', label: 'Security Manager' },
+            { id: 'admin', label: 'Admin Oversight' },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setViewMode(tab.id as any)}
+              className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-all ${
+                viewMode === tab.id
+                  ? 'bg-cyber-500/20 text-cyber-400 border border-cyber-500/30'
+                  : 'text-gray-400 hover:text-white hover:bg-surface-800'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
       </div>
+
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard title="Total Employees" value={stats.total_employees} icon={Users} color="text-cyber-400" />
-        <StatCard title="Total Alerts" value={stats.total_alerts} icon={AlertTriangle} color="text-warning-400" />
-        <StatCard
-          title="Critical Alerts"
-          value={stats.critical_alerts}
-          icon={ShieldAlert}
-          color="text-danger-400"
-        />
-        <StatCard title="High Risk Employees" value={stats.high_risk_employees} icon={BarChart3} color="text-danger-400" />
-        <StatCard title="Open Alerts" value={stats.open_alerts} icon={AlertTriangle} color="text-warning-400" />
-        <StatCard title="Active Incidents" value={stats.active_incidents} icon={ShieldAlert} color="text-danger-400" />
-        <StatCard title="Total Activity Logs" value={stats.total_activity_logs.toLocaleString()} icon={Activity} color="text-matrix-400" />
-        <StatCard title="Total Incidents" value={stats.total_incidents} icon={ShieldAlert} color="text-cyber-400" />
+        {(viewMode === 'all' || viewMode === 'admin') && (
+          <StatCard title="Total Employees" value={stats.total_employees} icon={Users} color="text-cyber-400" />
+        )}
+        {(viewMode === 'all' || viewMode === 'soc') && (
+          <StatCard title="Total Alerts" value={stats.total_alerts} icon={AlertTriangle} color="text-warning-400" />
+        )}
+        {(viewMode === 'all' || viewMode === 'soc') && (
+          <StatCard title="Critical Alerts" value={stats.critical_alerts} icon={ShieldAlert} color="text-danger-400" />
+        )}
+        {(viewMode === 'all' || viewMode === 'manager') && (
+          <StatCard title="High Risk Employees" value={stats.high_risk_employees} icon={BarChart3} color="text-danger-400" />
+        )}
+        {(viewMode === 'all' || viewMode === 'soc') && (
+          <StatCard title="Open Alerts" value={stats.open_alerts} icon={AlertTriangle} color="text-warning-400" />
+        )}
+        {(viewMode === 'all' || viewMode === 'soc') && (
+          <StatCard title="Active Incidents" value={stats.active_incidents} icon={ShieldAlert} color="text-danger-400" />
+        )}
+        {(viewMode === 'all' || viewMode === 'admin') && (
+          <StatCard title="Total Activity Logs" value={stats.total_activity_logs.toLocaleString()} icon={Activity} color="text-matrix-400" />
+        )}
+        {(viewMode === 'all' || viewMode === 'manager' || viewMode === 'admin') && (
+          <StatCard title="Total Incidents" value={stats.total_incidents} icon={ShieldAlert} color="text-cyber-400" />
+        )}
       </div>
+
 
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

@@ -1,4 +1,4 @@
-import { api, downloadFile } from './client';
+import { api, downloadFile, LONG_REQUEST_TIMEOUT_MS } from './client';
 
 export interface AnomalyReport {
   generated_at: string;
@@ -74,7 +74,7 @@ export async function getEmployeeReport(employeeId: string, days = 30): Promise<
 
 export async function downloadAnomalyReport(format: 'pdf' | 'xlsx', days = 30): Promise<void> {
   const filename = `itbis_anomaly_report_${days}d.${format}`;
-  return downloadFile(`/reports/anomaly/${format}?days=${days}`, filename);
+  return downloadFile(`/reports/anomaly/${format}?days=${days}`, filename, LONG_REQUEST_TIMEOUT_MS);
 }
 
 export async function downloadEmployeeReport(

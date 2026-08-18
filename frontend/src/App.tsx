@@ -2,8 +2,10 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
 import Login from './pages/Login';
+import OAuthCallback from './pages/OAuthCallback';
 import Dashboard from './pages/Dashboard';
 import Employees from './pages/Employees';
+import AddEmployee from './pages/AddEmployee';
 import EmployeeDetail from './pages/EmployeeDetail';
 import ActivityLogs from './pages/ActivityLogs';
 import Alerts from './pages/Alerts';
@@ -21,6 +23,7 @@ export default function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/oauth/callback" element={<OAuthCallback />} />
           <Route
             path="/dashboard"
             element={<ProtectedRoute><Dashboard /></ProtectedRoute>}
@@ -28,6 +31,10 @@ export default function App() {
           <Route
             path="/employees"
             element={<ProtectedRoute><Employees /></ProtectedRoute>}
+          />
+          <Route
+            path="/employees/new"
+            element={<ProtectedRoute><AddEmployee /></ProtectedRoute>}
           />
           <Route
             path="/employees/:id"

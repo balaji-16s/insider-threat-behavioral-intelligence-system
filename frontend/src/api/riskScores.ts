@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api, LONG_REQUEST_TIMEOUT_MS } from './client';
 
 export interface RiskScore {
   employee_id: string;
@@ -71,7 +71,8 @@ export interface RiskScoreCalculateResult {
 }
 
 export async function calculateRiskScores(days = 30): Promise<RiskScoreCalculateResult> {
-  return api.post<RiskScoreCalculateResult>(`/risk-scores/calculate?days=${days}`);
+  // Runs the threat models over every employee — can take minutes on the full dataset.
+  return api.post<RiskScoreCalculateResult>(`/risk-scores/calculate?days=${days}`, undefined, LONG_REQUEST_TIMEOUT_MS);
 }
 
 export async function getRiskAnalytics(days = 30): Promise<RiskAnalytics> {

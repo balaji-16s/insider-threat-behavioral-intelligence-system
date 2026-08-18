@@ -3,7 +3,10 @@ import {
   detectAnomalies,
   listAnomalyAlerts,
   runMlDetection,
+  trainMlModel,
   getMlResults,
+  getLatestDetection,
+  getAnomalyStats,
   type AnomalyDetectionResult,
   type AnomalySummaryItem,
   type MlDetectionResult,
@@ -24,6 +27,7 @@ import {
   Target,
   Gauge,
   Fingerprint,
+  RefreshCw,
 } from 'lucide-react';
 
 const severityColors: Record<string, string> = {
@@ -56,6 +60,7 @@ function Calendar({ className }: { className?: string }) {
 export default function AnomalyDetection() {
   const [result, setResult] = useState<AnomalyDetectionResult | null>(null);
   const [anomalyAlerts, setAnomalyAlerts] = useState<AnomalySummaryItem[]>([]);
+  const [alertStats, setAlertStats] = useState<{ total_open: number; by_severity: Record<string, number> } | null>(null);
   const [mlResult, setMlResult] = useState<MlDetectionResult | null>(null);
   const [scanning, setScanning] = useState(false);
   const [mlRunning, setMlRunning] = useState(false);
@@ -65,7 +70,23 @@ export default function AnomalyDetection() {
   useEffect(() => {
     loadAnomalyAlerts();
     loadMlResults();
+    loadLatestDetection();
   }, []);
+
+  // Restore the last detection run so the summary cards and detection
+  // details survive navigation (previously they reset on every visit).
+  async function loadLatestDetection() {
+    try {
+      const [latest, stats] = await Promise.all([
+        getLatestDetection(),
+        getAnomalyStats().catch(() => null),
+      ]);
+      if (latest) setResult(latest);
+      if (stats) setAlertStats(stats);
+    } catch (err) {
+      console.error('Failed to load latest detection:', err);
+    }
+  }
 
   async function loadAnomalyAlerts() {
     try {
@@ -105,6 +126,18 @@ export default function AnomalyDetection() {
       setMlResult(res);
     } catch (err) {
       console.error('ML detection failed:', err);
+    } finally {
+      setMlRunning(false);
+    }
+  }
+
+  async function handleMlRetrain() {
+    setMlRunning(true);
+    try {
+      const res = await trainMlModel(30, 0.05);
+      setMlResult(res);
+    } catch (err) {
+      console.error('ML model retraining failed:', err);
     } finally {
       setMlRunning(false);
     }
@@ -180,8 +213,8 @@ export default function AnomalyDetection() {
               <Zap className="w-5 h-5 text-matrix-400" />
             </div>
             <div>
-              <p className="text-2xl font-bold text-white">{result?.alerts_created ?? anomalyAlerts.length}</p>
-              <p className="text-xs text-gray-500">Alerts Generated</p>
+              <p className="text-2xl font-bold text-white">{alertStats?.total_open ?? result?.alerts_created ?? anomalyAlerts.length}</p>
+              <p className="text-xs text-gray-500">Open Anomaly Alerts</p>
             </div>
           </div>
         </div>
@@ -263,6 +296,7 @@ export default function AnomalyDetection() {
                 <span className="text-sm font-medium">
                   Last scan completed: {result.scanned_employees} employees scanned, 
                   {result.alerts_created} new alerts created
+                  {result.generated_at && <> · {new Date(result.generated_at).toLocaleString()}</>}
                 </span>
               </div>
             </div>
@@ -328,23 +362,37 @@ export default function AnomalyDetection() {
                     contamination {((mlResult?.contamination ?? 0.05) * 100).toFixed(0)}%
                     {mlResult?.employees_no_activity ? ` · ${mlResult.employees_no_activity} with no activity excluded` : ''}
                     {mlResult && ` · last run ${new Date(mlResult.generated_at).toLocaleString()}`}
+                    {mlResult?.model_trained_at && ` · trained ${new Date(mlResult.model_trained_at).toLocaleString()}`}
                   </p>
                 </div>
               </div>
-              <button
-                onClick={handleMlRun}
-                disabled={mlRunning}
-                className="flex items-center gap-2 px-5 py-2.5 bg-violet-500/20 border border-violet-500/30 
-                  text-violet-400 rounded-lg font-medium hover:bg-violet-500/30 transition-all duration-150 
-                  disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {mlRunning ? (
-                  <div className="w-4 h-4 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
-                ) : (
-                  <Brain className="w-4 h-4" />
-                )}
-                {mlRunning ? 'Training & Scoring...' : 'Run ML Detection'}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleMlRetrain}
+                  disabled={mlRunning}
+                  className="flex items-center gap-2 px-4 py-2.5 bg-surface-800 border border-surface-700 
+                    text-gray-300 rounded-lg font-medium hover:bg-surface-700 transition-all duration-150 
+                    disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Re-train the model on the current dataset and persist it"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Retrain Model
+                </button>
+                <button
+                  onClick={handleMlRun}
+                  disabled={mlRunning}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-violet-500/20 border border-violet-500/30 
+                    text-violet-400 rounded-lg font-medium hover:bg-violet-500/30 transition-all duration-150 
+                    disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {mlRunning ? (
+                    <div className="w-4 h-4 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <Brain className="w-4 h-4" />
+                  )}
+                  {mlRunning ? 'Training & Scoring...' : 'Run ML Detection'}
+                </button>
+              </div>
             </div>
           </div>
 

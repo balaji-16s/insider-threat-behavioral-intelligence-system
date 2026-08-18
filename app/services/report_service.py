@@ -7,6 +7,8 @@ profiling, anomaly detection, and threat detection engines.
 
 from __future__ import annotations
 
+import copy
+import time as _time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from statistics import mean
@@ -20,7 +22,16 @@ from app.models.activity_log import ActivityLog
 from app.models.alert import Alert, AlertSeverity, AlertStatus
 from app.models.incident import Incident, IncidentStatus
 from app.models.risk_score import RiskScore, RiskLevel
-from app.services.threat_detection import assess_all_employees, assess_employee_threat
+from app.services.threat_detection import (
+    _top_risk_threats,
+    assess_employee_threat,
+)
+
+
+# Short-TTL cache so repeated loads / PDF / Excel exports don't recompute
+# the whole report on every request (it used to re-run threat models).
+_ORG_REPORT_CACHE: dict[str, Any] = {"ts": 0.0, "days": 0, "report": None}
+_ORG_REPORT_TTL_SECONDS = 60.0
 
 
 # ── Public API ──────────────────────────────────────────────────
@@ -37,6 +48,14 @@ def generate_anomaly_report(
     Combines data from alerts, incidents, activity trends, risk scores,
     and optionally threat assessments.
     """
+    now_mono = _time.monotonic()
+    if (
+        now_mono - _ORG_REPORT_CACHE["ts"] < _ORG_REPORT_TTL_SECONDS
+        and _ORG_REPORT_CACHE["days"] == days
+        and _ORG_REPORT_CACHE["report"] is not None
+    ):
+        return copy.deepcopy(_ORG_REPORT_CACHE["report"])
+
     now = datetime.utcnow()
     cutoff = now - timedelta(days=days)
 
@@ -57,17 +76,25 @@ def generate_anomaly_report(
     report["high_risk_employees"] = _high_risk_employees(db, cutoff)
 
     if include_threat_assessment:
-        threat_assessments = assess_all_employees(db, days)
+        # Use the latest persisted risk scores — the exact same numbers as
+        # the Risk Scores module — so reports are consistent with the rest
+        # of the app and generate in fast SQL instead of re-running the
+        # full threat models on every load (which made reports and PDF
+        # exports lag and time out).
+        top = _top_risk_threats(db, limit=150)
         report["threat_assessment"] = {
-            "total_assessed": len(threat_assessments),
-            "top_threats": threat_assessments[:10],
+            "total_assessed": len(top),
+            "top_threats": top[:10],
             "average_threat_score": round(
-                sum(t["threat_score"] for t in threat_assessments)
-                / max(len(threat_assessments), 1),
+                sum(t["threat_score"] for t in top)
+                / max(len(top), 1),
                 1,
             ),
         }
 
+    _ORG_REPORT_CACHE.update(
+        ts=_time.monotonic(), days=days, report=report
+    )
     return report
 
 
@@ -336,7 +363,7 @@ def _risk_distribution(db: Session) -> dict[str, Any]:
         .all()
     )
 
-    return {str(level): count for level, count in distribution} or {
+    return {level.value: count for level, count in distribution} or {
         "low": 0,
         "medium": 0,
         "high": 0,

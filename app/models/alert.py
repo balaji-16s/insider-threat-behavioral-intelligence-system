@@ -1,7 +1,7 @@
 import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Enum, ForeignKey, JSON
+from sqlalchemy import Column, Index, String, DateTime, Enum, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.base import Base
 
@@ -20,6 +20,10 @@ class AlertStatus(str, enum.Enum):
 
 class Alert(Base):
     __tablename__ = "alerts"
+    __table_args__ = (
+        # Hot pattern: open-alert dedup / per-employee open-anomaly counts.
+        Index("ix_alerts_employee_status", "employee_id", "status"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     employee_id = Column(UUID(as_uuid=True), ForeignKey("employees.id"), nullable=False, index=True)

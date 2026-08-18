@@ -82,3 +82,29 @@ def test_manager_can_compute_baselines(client, auth_headers):
     resp = client.post("/api/v1/anomaly/baselines/compute", headers=headers)
     assert resp.status_code == 200
     assert "baselines_computed" in resp.json()
+
+
+def test_get_and_update_user_profile(client, auth_headers):
+    headers = auth_headers(email="profile@test.com", full_name="Original Name")
+    # GET /auth/me
+    resp = client.get("/api/v1/auth/me", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["email"] == "profile@test.com"
+    assert resp.json()["full_name"] == "Original Name"
+
+    # PUT /auth/me
+    upd = client.put(
+        "/api/v1/auth/me",
+        headers=headers,
+        json={"full_name": "Updated Name", "password": "newpassword123"},
+    )
+    assert upd.status_code == 200
+    assert upd.json()["full_name"] == "Updated Name"
+
+    # Verify login with new password
+    login_resp = client.post(
+        "/api/v1/auth/login",
+        data={"username": "profile@test.com", "password": "newpassword123"},
+    )
+    assert login_resp.status_code == 200
+

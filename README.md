@@ -10,6 +10,7 @@ Built with **FastAPI** + **React**, running on the **real CERT Insider Threat Te
 
 ### 🔐 Authentication & Role-Based Access
 - JWT authentication with bcrypt password hashing
+- **Google OAuth sign-in** ("Continue with Google") — set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` in `.env`; new Google users are provisioned automatically
 - 4 roles: `administrator`, `security_manager`, `soc_engineer`, `security_analyst`
 - Role-protected endpoints via dependency injection
 
@@ -23,7 +24,7 @@ Built with **FastAPI** + **React**, running on the **real CERT Insider Threat Te
 
 ### ⚡ Anomaly Detection (2 Engines)
 - **Statistical/rule-based**: Z-score, IQR, off-hours transfers, USB spikes, privilege escalation, large downloads, late-night & weekend patterns
-- **🤖 ML (Isolation Forest)**: unsupervised scikit-learn model on 14 behavioral features — scores every employee 0–100 with explainable top deviating factors, plus ground-truth validation against known insider labels
+- **🤖 ML (Isolation Forest)**: unsupervised scikit-learn model on 14 behavioral features — **trained once on the dataset** (`python scripts/train_ml_model.py` or the *Retrain Model* button) and persisted to `data/models/`; scoring loads the trained model for inference instead of re-fitting on every run. Scores every employee 0–100 with explainable top deviating factors, plus ground-truth validation against known insider labels
 
 ### 🎯 Insider Risk Scoring
 - Weighted multi-model threat engine (data exfiltration, off-hours access, privilege abuse, policy violations, behavioral deviation)
@@ -54,6 +55,13 @@ The platform runs on **real insider-threat data** from the CMU SEI CERT Insider 
 | USB device events | `device.csv` | 65K |
 | Web/network events | `http.csv` | 3.45M |
 | **Total real events** | | **4.37M** |
+
+CERT r1 only contains logon/device/http events. Run the enrichment script to add
+the other 5 monitored activity types (`file_download`, `file_upload`, `email`,
+`privilege_change`, `remote_access`) so all 8 types appear in every module:
+```bash
+python scripts/enrich_activity.py
+```
 
 - **Ground-truth insider labels** saved to `data/cert/insiders.json` for evaluating detection models
 - Timestamps are **rebased to the present** so the platform's 30-day analytics windows work with the 2010–2011 data (relative behavior is preserved; use `--no-rebase` to keep original dates)
@@ -120,6 +128,8 @@ python scripts/ingest_cert.py --all --max-users 200   # smaller subset
 ```bash
 cp .env.example .env
 docker compose up -d          # PostgreSQL (:5433) + Redis (:6379)
+# Optional: enable Google OAuth by filling in GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+# and GOOGLE_REDIRECT_URI (create an OAuth 2.0 Client ID at Google Cloud Console).
 ```
 
 ### 3. Backend
@@ -139,12 +149,11 @@ npm install
 npm run dev                   # http://localhost:5173
 ```
 
-### 5. Demo Accounts
-| Role | Email | Password |
-|------|-------|----------|
-| Administrator | `admin@itbis.com` | `admin123` |
-| Security Manager | `manager@itbis.com` | `manager123` |
-| Security Analyst | `analyst@itbis.com` | `analyst123` |
+### 5. Accounts (Google OAuth only)
+There are **no demo credentials** — all accounts sign in with **Continue with Google**.
+The first Google sign-in automatically becomes the **Administrator**; later sign-ins
+are provisioned as **Security Analysts**. (Roles map to the 3 documented logins:
+`administrator`, `security_manager`, `security_analyst` — adjust roles in the DB if needed.)
 
 ### 6. First Run Workflow
 1. Log in → Dashboard shows org risk posture & top threats
@@ -159,7 +168,7 @@ npm run dev                   # http://localhost:5173
 
 | Area | Endpoints |
 |------|-----------|
-| Auth | `POST /api/v1/auth/register` · `POST /api/v1/auth/login` |
+| Auth | `POST /api/v1/auth/register` · `POST /api/v1/auth/login` · `GET/PUT /api/v1/auth/me` |
 | Employees | `GET/POST /api/v1/employees` · `GET/PUT/DELETE /api/v1/employees/{id}` · stats |
 | Activity | `GET/POST /api/v1/activity-logs` · `POST /api/v1/activity-logs/bulk` |
 | Anomaly | `POST /api/v1/anomaly/detect` · `POST /api/v1/anomaly/ml/detect` · `GET /api/v1/anomaly/ml/results` · `POST /api/v1/anomaly/baselines/compute` · `GET /api/v1/anomaly/threat/top` |
@@ -167,6 +176,7 @@ npm run dev                   # http://localhost:5173
 | UEBA | `POST /api/v1/ueba/pipeline` · `GET /api/v1/ueba/overview` · `GET /api/v1/ueba/overview/{employee_id}` |
 | Alerts | `GET/POST /api/v1/alerts` · `PATCH /api/v1/alerts/{id}` · `POST /api/v1/alerts/{id}/escalate` |
 | Incidents | `GET/POST /api/v1/incidents` · `PATCH /api/v1/incidents/{id}` · `POST /api/v1/incidents/{id}/timeline` · `GET /api/v1/incidents/{id}/related-alerts` |
+| Notifications | `GET /api/v1/notifications` · `POST /api/v1/notifications/send` |
 | Reports | `GET /api/v1/reports/anomaly` · `GET /api/v1/reports/employee/{employee_id}` · **PDF/Excel export**: `/anomaly/pdf` · `/anomaly/xlsx` · `/employee/{id}/pdf` · `/employee/{id}/xlsx` |
 | Dashboard | `GET /api/v1/dashboard/stats` · `GET /api/v1/dashboard/recent-alerts` · `GET /api/v1/dashboard/activity-trends` |
 
@@ -174,14 +184,16 @@ npm run dev                   # http://localhost:5173
 
 ## 🧪 Testing
 
-29 automated tests cover the core engine and API workflows (run against a dedicated `itbis_test` PostgreSQL database):
+46 automated tests cover the core engine, notifications, and API workflows (run against a dedicated `itbis_test` PostgreSQL database):
 
-*   **Auth & RBAC** — registration, login, token auth, role restrictions (403s)
+*   **Auth & RBAC & Profile** — registration, login, token auth, user profile update (`/auth/me`), role restrictions (403s)
 *   **Anomaly detection** — rule-based off-hours exfiltration, quiet-user negatives, threat scoring
 *   **Risk scoring** — score persistence, engine-score replacement, analytics
 *   **ML engine** — Isolation Forest flags seeded insiders, no-activity exclusion, 0-100 range
+*   **Notifications** — multi-channel alert dispatch (email/webhook/in-app) and audit logging
 *   **Report export** — valid PDF/Excel magic bytes for org & employee reports
 *   **API workflows** — employee CRUD, bulk activity ingestion, alert escalation, dashboard stats
+
 
 ```bash
 # requires Docker Compose services running (PostgreSQL :5433)
@@ -190,8 +202,9 @@ venv/bin/python -m pytest
 
 ## 📈 Performance Notes
 
-- Behavioral baseline peer-comparison uses SQL aggregation — whole-org baseline computation runs in minutes even at **1,000 employees / 4.37M events**
-- ML anomaly detection scores 1,000 employees in ~30 seconds
+- The UEBA pipeline (baselines → anomalies → risk scores) is **manual**: click **Run UEBA Pipeline** / **Recalculate Scores** to refresh. Baselines are batched (chunked activity loading + single-SQL department peer stats) so the whole pipeline completes in a few minutes at 1,000 employees / 4.4M+ events
+- ML anomaly detection scores 1,000 employees in ~15 seconds using the persisted trained model (no per-run re-fitting); retrain with `python scripts/train_ml_model.py` or the **Retrain Model** button
+- Reports, top-threats and risk pages all read the **same persisted risk scores**, so every module shows identical numbers; org reports are cached 60s and export fast
 
 ---
 
@@ -202,9 +215,11 @@ venv/bin/python -m pytest
 - [x] Milestone 3 — Risk scoring, UEBA pipeline, investigation workflows
 - [x] **ML anomaly detection (Isolation Forest)**
 - [x] PDF/Excel report export (reportlab + openpyxl, download buttons on Anomaly Reports page)
-- [x] Automated tests (pytest — 29 tests across auth, engines, exports, API)
-- [ ] Docker image for the app + CI/CD (GitHub Actions)
-- [ ] Notification & escalation (email/webhook)
+- [x] Automated tests (pytest — 46 tests passing across auth, engines, notifications, exports, API)
+- [x] Docker images for full app + CI/CD (GitHub Actions `.github/workflows/ci.yml`)
+- [x] Notification & escalation system (email/webhook notification dispatch service)
+- [x] User Profile Management API (`GET/PUT /api/v1/auth/me`) & Role-Based Dashboard Views
+
 
 ---
 

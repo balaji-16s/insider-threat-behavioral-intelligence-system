@@ -23,6 +23,8 @@ from app.services.ml_anomaly_detection import (
 from app.services.anomaly_detection import (
     run_anomaly_detection,
     get_anomaly_summary,
+    get_anomaly_stats,
+    get_cached_detection_results,
 )
 from app.services.behavioral_profiling import (
     compute_baseline,
@@ -43,11 +45,31 @@ router = APIRouter(prefix="/api/v1/anomaly", tags=["Anomaly Detection"])
 def ml_detect(
     days: int = Query(30, ge=7, le=365),
     contamination: float = Query(0.05, ge=0.01, le=0.30),
+    retrain: bool = Query(False, description="Force re-fitting the model before scoring"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Run the ML (Isolation Forest) anomaly detection engine for all employees."""
-    return run_ml_anomaly_detection(db, days=days, contamination=contamination)
+    """Score all employees with the trained Isolation Forest model.
+
+    Uses the persisted model (see scripts/train_ml_model.py) unless
+    ``retrain`` is set or no model has been trained yet.
+    """
+    return run_ml_anomaly_detection(
+        db, days=days, contamination=contamination, retrain=retrain
+    )
+
+
+@router.post("/ml/train", response_model=MlDetectionResult)
+def ml_train(
+    days: int = Query(30, ge=7, le=365),
+    contamination: float = Query(0.05, ge=0.01, le=0.30),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("administrator", "security_manager")),
+):
+    """Retrain the Isolation Forest model from current data, persist it, then score."""
+    return run_ml_anomaly_detection(
+        db, days=days, contamination=contamination, retrain=True
+    )
 
 
 @router.get("/ml/results", response_model=MlDetectionResult | None)
@@ -78,6 +100,24 @@ def list_anomaly_alerts(
 ):
     """List open anomaly alerts."""
     return get_anomaly_summary(db, employee_id)
+
+
+@router.get("/alerts/stats")
+def anomaly_alerts_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Real totals of open anomaly alerts (not capped like the list)."""
+    return get_anomaly_stats(db)
+
+
+@router.get("/detect/latest", response_model=AnomalyDetectionResult | None)
+def latest_detection(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the most recent anomaly detection run (persisted)."""
+    return get_cached_detection_results()
 
 
 @router.post("/baselines/compute", response_model=BaselineComputeResult)

@@ -8,8 +8,10 @@ from app.models.alert import Alert
 from app.models.employee import Employee
 from app.models.incident import Incident
 from app.schemas.alert import AlertCreate, AlertUpdate, AlertOut
+from app.schemas.incident import IncidentOut
 from app.core.deps import get_current_user, require_role
 from app.models.user import User
+from app.services.notification_service import notify_escalation
 
 router = APIRouter(prefix="/api/v1/alerts", tags=["Alerts"])
 
@@ -79,7 +81,7 @@ def update_alert(
     return alert
 
 
-@router.post("/{alert_id}/escalate", status_code=status.HTTP_201_CREATED)
+@router.post("/{alert_id}/escalate", response_model=IncidentOut, status_code=status.HTTP_201_CREATED)
 def escalate_alert_to_incident(
     alert_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -100,4 +102,15 @@ def escalate_alert_to_incident(
     db.add(incident)
     db.commit()
     db.refresh(incident)
+
+    try:
+        notify_escalation(
+            db=db,
+            incident_id=str(incident.id),
+            incident_title=incident.title,
+            assigned_analyst=str(incident.assigned_analyst_id) if incident.assigned_analyst_id else None,
+        )
+    except Exception:
+        pass
+
     return incident

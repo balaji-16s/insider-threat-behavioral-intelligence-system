@@ -6,3 +6,4 @@ from app.models.behavioral_baseline import BehavioralBaseline
 from app.models.risk_score import RiskScore
 from app.models.alert import Alert
 from app.models.incident import Incident
+from app.models.notification import Notification

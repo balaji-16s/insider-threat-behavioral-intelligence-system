@@ -8,17 +8,20 @@ abuse, policy violations, and overall insider threat scoring.
 
 from __future__ import annotations
 
+import time as _time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from statistics import mean, stdev
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.employee import Employee
 from app.models.activity_log import ActivityLog, ActivityType
 from app.models.alert import Alert, AlertSeverity, AlertStatus
 from app.models.risk_score import RiskScore, RiskLevel
+from app.models.behavioral_baseline import BehavioralBaseline
 from app.services.behavioral_profiling import get_employee_profile
 
 
@@ -37,27 +40,34 @@ WEIGHTS = {
 
 
 def assess_employee_threat(
-    db: Session, employee_id: str, days: int = 30
+    db: Session,
+    employee_id: str,
+    days: int = 30,
+    logs: list[ActivityLog] | None = None,
+    baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run all threat models for one employee and produce a consolidated score."""
     # Load the employee's activity once and share it across all models to
     # avoid 5x redundant queries (important when scoring 1000 employees).
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    logs = (
-        db.query(ActivityLog)
-        .filter(
-            ActivityLog.employee_id == employee_id,
-            ActivityLog.occurred_at >= cutoff,
+    if logs is None:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        logs = (
+            db.query(ActivityLog)
+            .filter(
+                ActivityLog.employee_id == employee_id,
+                ActivityLog.occurred_at >= cutoff,
+            )
+            .all()
         )
-        .all()
-    )
 
     models = {
         "data_exfiltration": _data_exfiltration_score(db, employee_id, days, logs=logs),
         "off_hours_access": _off_hours_access_score(db, employee_id, days, logs=logs),
         "privilege_abuse": _privilege_abuse_score(db, employee_id, days, logs=logs),
         "policy_violation": _policy_violation_score(db, employee_id, days, logs=logs),
-        "behavioral_deviation": _behavioral_deviation_score(db, employee_id, days, logs=logs),
+        "behavioral_deviation": _behavioral_deviation_score(
+            db, employee_id, days, logs=logs, baseline=baseline
+        ),
     }
 
     raw_score = sum(
@@ -78,30 +88,243 @@ def assess_employee_threat(
 
 
 def assess_all_employees(
-    db: Session, days: int = 30
+    db: Session, days: int = 30, candidate_limit: int | None = None
 ) -> list[dict[str, Any]]:
-    """Run threat assessment for every employee, sorted by score descending."""
+    """Run threat assessment for employees, sorted by score descending.
+
+    To stay fast and memory-bounded on large datasets (thousands of
+    employees / millions of activity logs):
+
+    - Stored baselines are loaded once with a single query.
+    - When ``candidate_limit`` is set (e.g. for "top threats"), a cheap
+      SQL aggregate pre-scores every employee and only the top candidates
+      receive the full (Python) threat models.
+    - Employee activity is loaded in small chunks with ``IN(...)`` queries
+      instead of one giant load or one query per employee.
+    """
     employees = db.query(Employee).all()
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    # Batch-load all stored baselines once, grouped by employee.
+    baselines_by_employee: dict[str, dict[str, Any]] = {}
+    for baseline in db.query(BehavioralBaseline).all():
+        baselines_by_employee[str(baseline.employee_id)] = (
+            baseline.baseline_data or {}
+        )
+
+    if candidate_limit is not None:
+        # Cheap SQL pre-score (counts of suspicious activity per employee)
+        # to pick which employees deserve the full model run.
+        pre_scores = _pre_score_employees(db, cutoff)
+        employees = sorted(
+            employees,
+            key=lambda e: pre_scores.get(str(e.id), 0),
+            reverse=True,
+        )[:candidate_limit]
+
+    assessments = assess_employees_batch(
+        db,
+        [str(e.id) for e in employees],
+        days,
+        baselines_by_employee=baselines_by_employee,
+        cutoff=cutoff,
+    )
+
     results = []
     for emp in employees:
-        try:
-            result = assess_employee_threat(db, str(emp.id), days)
-            result["employee_name"] = emp.full_name
-            result["department"] = emp.department
-            results.append(result)
-        except Exception:
+        result = assessments.get(str(emp.id))
+        if result is None:
             continue
+        result["employee_name"] = emp.full_name
+        result["department"] = emp.department
+        results.append(result)
 
     results.sort(key=lambda r: r["threat_score"], reverse=True)
     return results
 
 
+# Short-TTL cache for the top-threats widget. Threat scores only change
+# when new activity is ingested, so serving a brief stale snapshot makes
+# repeated dashboard/report loads fast instead of re-scoring every time.
+_TOP_THREATS_CACHE: dict[str, Any] = {"timestamp": 0.0, "assessments": []}
+_TOP_THREATS_TTL_SECONDS = 60.0
+_TOP_THREATS_CACHE_SIZE = 60
+
+
 def get_top_threats(
     db: Session, limit: int = 20
 ) -> list[dict[str, Any]]:
-    """Return the highest-threat employees."""
-    all_assessments = assess_all_employees(db)
-    return all_assessments[:limit]
+    """Return the highest-threat employees (fast, bounded memory).
+
+    Reads the latest persisted risk scores — the exact same numbers shown
+    on the Risk Scores module — so every view stays consistent, and the
+    result is cached briefly (60s). Falls back to a live whole-org
+    assessment only when no risk scores have been computed yet.
+    """
+    now = _time.monotonic()
+    if (
+        now - _TOP_THREATS_CACHE["timestamp"] < _TOP_THREATS_TTL_SECONDS
+        and _TOP_THREATS_CACHE["assessments"]
+    ):
+        return _TOP_THREATS_CACHE["assessments"][:limit]
+
+    results = _top_risk_threats(
+        db, limit=max(_TOP_THREATS_CACHE_SIZE, limit * 3)
+    )
+    if not results:
+        # No persisted scores yet — fall back to a live assessment.
+        results = assess_all_employees(
+            db, candidate_limit=max(_TOP_THREATS_CACHE_SIZE, limit * 3)
+        )
+    _TOP_THREATS_CACHE["timestamp"] = now
+    _TOP_THREATS_CACHE["assessments"] = results
+    return results[:limit]
+
+
+def _top_risk_threats(
+    db: Session, limit: int = 150
+) -> list[dict[str, Any]]:
+    """Top employees by latest persisted risk score — fast SQL.
+
+    Shapes each entry like an assessment result (``threat_score``,
+    ``model_scores`` from the stored breakdown, etc.) so reports and the
+    top-threats widget can consume the exact same data as the risk module.
+    """
+    subquery = (
+        db.query(
+            RiskScore.employee_id,
+            RiskScore.score,
+            RiskScore.risk_level,
+            RiskScore.breakdown,
+            RiskScore.calculated_at,
+        )
+        .distinct(RiskScore.employee_id)
+        .order_by(RiskScore.employee_id, RiskScore.calculated_at.desc())
+    ).subquery()
+
+    rows = (
+        db.query(
+            Employee.id,
+            Employee.employee_code,
+            Employee.full_name,
+            Employee.department,
+            Employee.designation,
+            subquery.c.score,
+            subquery.c.risk_level,
+            subquery.c.breakdown,
+            subquery.c.calculated_at,
+        )
+        .join(subquery, Employee.id == subquery.c.employee_id)
+        .order_by(subquery.c.score.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return [
+        {
+            "employee_id": str(r.id),
+            "employee_code": r.employee_code,
+            "employee_name": r.full_name,
+            "department": r.department,
+            "designation": r.designation,
+            "threat_score": round(float(r.score), 1),
+            "threat_level": r.risk_level.value,
+            "model_scores": (r.breakdown or {}).get("model_scores", {}),
+            "assessed_at": (
+                r.calculated_at.isoformat() if r.calculated_at else None
+            ),
+            "lookback_days": 30,
+        }
+        for r in rows
+    ]
+
+
+def assess_employees_batch(
+    db: Session,
+    employee_ids: list[str],
+    days: int = 30,
+    baselines_by_employee: dict[str, dict[str, Any]] | None = None,
+    cutoff: datetime | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Run the full threat assessment for a set of employees efficiently.
+
+    Employee activity is loaded in small chunks with ``IN(...)`` queries
+    (memory-bounded) and baselines are looked up from an in-memory map so
+    callers never hit the per-employee N+1 query pattern on large datasets.
+
+    Returns ``{employee_id: assessment}``; employees that error out are
+    skipped.
+    """
+    if cutoff is None:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+    if baselines_by_employee is None:
+        baselines_by_employee = {
+            str(b.employee_id): (b.baseline_data or {})
+            for b in db.query(BehavioralBaseline).all()
+        }
+
+    results: dict[str, dict[str, Any]] = {}
+    for chunk in _chunks(employee_ids, 20):
+        logs_by_employee: dict[str, list[Any]] = defaultdict(list)
+        for log in (
+            db.query(
+                ActivityLog.employee_id,
+                ActivityLog.activity_type,
+                ActivityLog.occurred_at,
+                ActivityLog.details,
+            )
+            .filter(
+                ActivityLog.employee_id.in_(chunk),
+                ActivityLog.occurred_at >= cutoff,
+            )
+            .all()
+        ):
+            logs_by_employee[str(log.employee_id)].append(log)
+
+        for emp_id in chunk:
+            try:
+                results[emp_id] = assess_employee_threat(
+                    db,
+                    emp_id,
+                    days,
+                    logs=logs_by_employee.get(emp_id, []),
+                    baseline=baselines_by_employee.get(emp_id),
+                )
+            except Exception:
+                continue
+    return results
+
+
+def _chunks(items: list[Any], size: int) -> list[list[Any]]:
+    """Split a list into consecutive chunks of at most ``size`` items."""
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _pre_score_employees(
+    db: Session, cutoff: datetime
+) -> dict[str, int]:
+    """Cheap SQL heuristic: count suspicious activity per employee.
+
+    Used only to decide which employees get the full (expensive) threat
+    model run, so the dashboard/UEBA ranking stays fast on large datasets.
+    """
+    from sqlalchemy import or_
+
+    hour_expr = func.extract("hour", ActivityLog.occurred_at)
+    suspicious = or_(
+        ActivityLog.activity_type == ActivityType.DATA_TRANSFER,
+        ActivityLog.activity_type == ActivityType.USB_DEVICE,
+        ActivityLog.activity_type == ActivityType.PRIVILEGE_CHANGE,
+        ActivityLog.activity_type == ActivityType.REMOTE_ACCESS,
+        or_(hour_expr < 7, hour_expr > 19),
+    )
+    rows = (
+        db.query(ActivityLog.employee_id, func.count())
+        .filter(ActivityLog.occurred_at >= cutoff, suspicious)
+        .group_by(ActivityLog.employee_id)
+        .all()
+    )
+    return {str(emp_id): count for emp_id, count in rows}
 
 
 # ── Individual Threat Models ────────────────────────────────────
@@ -426,14 +649,16 @@ def _behavioral_deviation_score(
     employee_id: str,
     days: int,
     logs: list[ActivityLog] | None = None,
+    baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Behavioral deviation threat model.
 
     Measures how much current behavior deviates from the established baseline.
     """
-    profile = get_employee_profile(db, employee_id)
-    baseline = profile.get("baseline_data", {})
+    if baseline is None:
+        profile = get_employee_profile(db, employee_id)
+        baseline = profile.get("baseline_data", {})
     if not baseline or "error" in baseline:
         return {
             "score": 0,

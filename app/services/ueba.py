@@ -28,7 +28,10 @@ from app.services.behavioral_profiling import (
 )
 from app.services.anomaly_detection import run_anomaly_detection
 from app.services.risk_scoring import calculate_risk_scores
-from app.services.threat_detection import assess_employee_threat
+from app.services.threat_detection import (
+    assess_employee_threat,
+    assess_employees_batch,
+)
 
 
 # ── Pipeline ─────────────────────────────────────────────────────
@@ -86,6 +89,11 @@ def get_ueba_overview(
     """
     Consolidated per-employee UEBA view combining the latest risk score,
     threat assessment, open anomaly alerts, and baseline status.
+
+    Only the top ``limit`` employees by latest risk score receive a threat
+    assessment (the rows actually displayed), which keeps this endpoint
+    fast and memory-bounded on large datasets instead of running the
+    per-employee N+1 assessment pattern over every employee.
     """
     employees = db.query(Employee).all()
 
@@ -101,9 +109,25 @@ def get_ueba_overview(
         for b in db.query(BehavioralBaseline.employee_id).all()
     }
 
+    # The overview is sorted by risk score and sliced to ``limit``, so only
+    # the rows that will actually be shown need a threat assessment.
+    employees.sort(
+        key=lambda e: (
+            latest_scores.get(e.id)["score"]
+            if latest_scores.get(e.id)
+            else -1.0
+        ),
+        reverse=True,
+    )
+    shown = employees[:limit]
+
+    assessments = assess_employees_batch(
+        db, [str(e.id) for e in shown], days
+    )
+
     items = []
-    for emp in employees:
-        threat = _safe_threat(db, str(emp.id), days)
+    for emp in shown:
+        threat = assessments.get(str(emp.id))
         latest = latest_scores.get(emp.id)
 
         items.append(
@@ -128,16 +152,11 @@ def get_ueba_overview(
             }
         )
 
-    items.sort(
-        key=lambda i: (i["risk_score"] if i["risk_score"] is not None else -1),
-        reverse=True,
-    )
-
     return {
-        "total_employees": len(items),
+        "total_employees": len(employees),
         "lookback_days": days,
         "generated_at": datetime.utcnow().isoformat(),
-        "items": items[:limit],
+        "items": items,
     }
 
 

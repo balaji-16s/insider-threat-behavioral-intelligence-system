@@ -3,9 +3,22 @@
 import random
 from datetime import datetime, timedelta
 
+import pytest
+
 from app.models.activity_log import ActivityLog, ActivityType
 from app.models.employee import Employee
 from app.services import ml_anomaly_detection
+
+
+@pytest.fixture(autouse=True)
+def _isolated_model_paths(tmp_path, monkeypatch):
+    """Keep persisted-model files out of the real data/models directory."""
+    monkeypatch.setattr(
+        ml_anomaly_detection, "MODEL_PATH", tmp_path / "iso_forest.joblib"
+    )
+    monkeypatch.setattr(
+        ml_anomaly_detection, "MODEL_META_PATH", tmp_path / "iso_forest_meta.json"
+    )
 
 
 def _seed_population(db):
@@ -96,3 +109,58 @@ def test_ml_scores_range_zero_to_hundred(db, monkeypatch, tmp_path):
     result = ml_anomaly_detection.run_ml_anomaly_detection(db, days=30, contamination=0.05)
     for item in result["top_flagged"]:
         assert 0.0 <= item["ml_score"] <= 100.0
+
+
+def test_model_is_persisted_and_reused(db, monkeypatch, tmp_path):
+    monkeypatch.setattr(ml_anomaly_detection, "RESULTS_CACHE", tmp_path / "ml.json")
+    _seed_population(db)
+
+    result = ml_anomaly_detection.run_ml_anomaly_detection(
+        db, days=30, contamination=0.05
+    )
+    assert result["model_trained_at"] is not None
+    assert (tmp_path / "iso_forest.joblib").exists()
+    assert (tmp_path / "iso_forest_meta.json").exists()
+
+    # A second run loads the persisted model (no re-fit) and scores identically.
+    result2 = ml_anomaly_detection.run_ml_anomaly_detection(
+        db, days=30, contamination=0.05
+    )
+    assert result2["outliers_detected"] == result["outliers_detected"]
+    assert [i["employee_code"] for i in result2["top_flagged"]] == [
+        i["employee_code"] for i in result["top_flagged"]
+    ]
+
+
+def test_train_and_save_model_persists(db, monkeypatch, tmp_path):
+    monkeypatch.setattr(ml_anomaly_detection, "RESULTS_CACHE", tmp_path / "ml.json")
+    _seed_population(db)
+
+    out = ml_anomaly_detection.train_and_save_model(db, days=30, contamination=0.05)
+    assert out["trained"] is True
+    assert out["samples"] == 42
+    assert out["model_path"].endswith("iso_forest.joblib")
+    assert (tmp_path / "iso_forest.joblib").exists()
+
+    # A later scoring run picks up the persisted model.
+    result = ml_anomaly_detection.run_ml_anomaly_detection(
+        db, days=30, contamination=0.05
+    )
+    assert result["scanned_employees"] == 42
+    assert result["model_trained_at"] is not None
+
+
+def test_retrain_overwrites_model(db, monkeypatch, tmp_path):
+    monkeypatch.setattr(ml_anomaly_detection, "RESULTS_CACHE", tmp_path / "ml.json")
+    _seed_population(db)
+
+    ml_anomaly_detection.run_ml_anomaly_detection(db, days=30, contamination=0.05)
+    meta1 = (tmp_path / "iso_forest_meta.json").read_text()
+
+    # Retrain forces a fresh fit and re-saves the model.
+    result = ml_anomaly_detection.run_ml_anomaly_detection(
+        db, days=30, contamination=0.05, retrain=True
+    )
+    assert result["model_trained_at"] is not None
+    assert (tmp_path / "iso_forest_meta.json").exists()
+    assert (tmp_path / "iso_forest_meta.json").read_text() != meta1

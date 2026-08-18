@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api, LONG_REQUEST_TIMEOUT_MS } from './client';
 
 export interface UebaPipelineResult {
   baselines_computed: number;
@@ -45,7 +45,8 @@ export async function runUebaPipeline(days = 30, employeeId?: string): Promise<U
   const query = new URLSearchParams();
   query.set('days', String(days));
   if (employeeId) query.set('employee_id', employeeId);
-  return api.post<UebaPipelineResult>(`/ueba/pipeline?${query.toString()}`);
+  // The pipeline processes every employee and takes minutes on the full dataset.
+  return api.post<UebaPipelineResult>(`/ueba/pipeline?${query.toString()}`, undefined, LONG_REQUEST_TIMEOUT_MS);
 }
 
 export async function getUebaOverview(days = 30, limit = 100): Promise<UebaOverview> {

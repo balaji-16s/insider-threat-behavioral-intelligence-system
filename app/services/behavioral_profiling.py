@@ -48,15 +48,48 @@ def compute_baseline(db: Session, employee_id: str) -> dict[str, Any]:
 
 
 def compute_all_baselines(db: Session) -> int:
-    """Recompute baselines for every employee in the database."""
+    """Recompute baselines for every employee in the database.
+
+    Batched so whole-org computation stays fast and memory-bounded on large
+    datasets: employee activity is loaded in chunks with ``IN(...)`` queries
+    and peer statistics are aggregated per department in a single SQL pass
+    instead of firing per-employee queries (the old N+1 pattern).
+    """
     employees = db.query(Employee).all()
+    cutoff = datetime.utcnow() - timedelta(days=90)
+
+    dept_stats = _department_peer_stats(db, cutoff, employees)
+
+    existing = {
+        str(b.employee_id): b
+        for b in db.query(BehavioralBaseline).all()
+    }
+
     count = 0
-    for emp in employees:
-        data = compute_baseline(db, str(emp.id))
-        if "error" in data:
-            continue
-        store_baseline(db, str(emp.id), data)
-        count += 1
+    for chunk in _chunks(employees, 20):
+        logs_by_employee: dict[str, list[Any]] = defaultdict(list)
+        for log in (
+            db.query(
+                ActivityLog.employee_id,
+                ActivityLog.activity_type,
+                ActivityLog.occurred_at,
+                ActivityLog.details,
+            )
+            .filter(
+                ActivityLog.employee_id.in_([e.id for e in chunk]),
+                ActivityLog.occurred_at >= cutoff,
+            )
+            .all()
+        ):
+            logs_by_employee[str(log.employee_id)].append(log)
+
+        for emp in chunk:
+            logs = logs_by_employee.get(str(emp.id), [])
+            if not logs:
+                continue
+            data = _build_baseline(emp, logs, dept_stats)
+            _store_baseline(existing, db, str(emp.id), data)
+            count += 1
 
     db.commit()
     return count
@@ -84,6 +117,124 @@ def store_baseline(
     db.add(baseline)
     db.flush()
     return baseline
+
+
+def _chunks(items: list[Any], size: int) -> list[list[Any]]:
+    """Split a list into consecutive chunks of at most ``size`` items."""
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _department_peer_stats(
+    db: Session, cutoff: datetime, employees: list[Employee]
+) -> dict[str, dict[str, Any]]:
+    """Aggregate peer statistics per department with a single SQL pass.
+
+    Returns ``{department: {peer_group_size, peer_daily_avg, peer_off_hours_pct}}``
+    so batched baseline computation never issues per-employee peer queries.
+    """
+    dept_sizes: Counter[str] = Counter(
+        e.department for e in employees if e.department
+    )
+
+    hour_expr = func.extract("hour", ActivityLog.occurred_at)
+    off_hours_cond = or_(hour_expr < 7, hour_expr > 19)
+    rows = (
+        db.query(
+            Employee.department,
+            func.count(ActivityLog.id),
+            func.count(func.distinct(cast(ActivityLog.occurred_at, Date))),
+            func.coalesce(func.sum(case((off_hours_cond, 1), else_=0)), 0),
+        )
+        .join(ActivityLog, ActivityLog.employee_id == Employee.id)
+        .filter(ActivityLog.occurred_at >= cutoff)
+        .group_by(Employee.department)
+        .all()
+    )
+
+    stats: dict[str, dict[str, Any]] = {}
+    for dept, total, distinct_days, off_hours in rows:
+        stats[dept] = {
+            "peer_group_size": max(dept_sizes.get(dept, 0) - 1, 0),
+            "peer_daily_avg": round(total / max(distinct_days, 1), 1),
+            "peer_off_hours_pct": (
+                round(off_hours / total * 100, 1) if total else 0
+            ),
+        }
+    return stats
+
+
+def _build_baseline(
+    employee: Employee,
+    logs: list[ActivityLog],
+    dept_stats: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a full baseline for one employee from preloaded logs."""
+    data: dict[str, Any] = {
+        "generated_at": datetime.utcnow().isoformat(),
+        "total_logs": len(logs),
+        "daily_avg": round(len(logs) / 30, 2) if logs else 0,
+    }
+    data.update(_activity_type_profile(logs))
+    data.update(_temporal_profile(logs))
+    data.update(_statistical_baselines(logs))
+    data.update(_peer_comparison_from_stats(employee, logs, dept_stats))
+    return data
+
+
+def _peer_comparison_from_stats(
+    employee: Employee,
+    employee_logs: list[ActivityLog],
+    dept_stats: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Peer comparison using precomputed per-department stats (no queries)."""
+    dept = employee.department
+    stats = (dept_stats or {}).get(dept) if dept else None
+    if not stats:
+        return {"peer_group": None}
+
+    emp_daily = Counter(
+        log.occurred_at.strftime("%Y-%m-%d") for log in employee_logs
+    )
+    emp_avg = round(mean(emp_daily.values()), 1) if emp_daily else 0
+    emp_off_hours = sum(
+        1
+        for log in employee_logs
+        if log.occurred_at.hour < 7 or log.occurred_at.hour > 19
+    )
+    emp_off_hours_pct = round(
+        emp_off_hours / max(len(employee_logs), 1) * 100, 1
+    )
+
+    return {
+        "peer_group": dept,
+        "peer_group_size": stats["peer_group_size"],
+        "your_daily_avg": emp_avg,
+        "peer_daily_avg": stats["peer_daily_avg"],
+        "your_off_hours_pct": emp_off_hours_pct,
+        "peer_off_hours_pct": stats["peer_off_hours_pct"],
+        "activity_vs_peer": round(emp_avg - stats["peer_daily_avg"], 1),
+    }
+
+
+def _store_baseline(
+    existing: dict[str, BehavioralBaseline],
+    db: Session,
+    employee_id: str,
+    data: dict[str, Any],
+) -> None:
+    """Upsert a baseline using the preloaded ``existing`` map (no query)."""
+    baseline = existing.get(employee_id)
+    if baseline:
+        baseline.baseline_data = data
+        baseline.updated_at = datetime.utcnow()
+    else:
+        baseline = BehavioralBaseline(
+            employee_id=employee_id,
+            baseline_data=data,
+            generated_at=datetime.utcnow(),
+        )
+        db.add(baseline)
+        existing[employee_id] = baseline
 
 
 def get_employee_profile(

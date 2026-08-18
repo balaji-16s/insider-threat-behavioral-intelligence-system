@@ -16,14 +16,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.db.base import SessionLocal, engine, Base
-from app.models.user import User, UserRole
 from app.models.employee import Employee
 from app.models.activity_log import ActivityLog, ActivityType
 from app.models.behavioral_baseline import BehavioralBaseline
 from app.models.risk_score import RiskScore, RiskLevel
 from app.models.alert import Alert, AlertSeverity, AlertStatus
 from app.models.incident import Incident, IncidentStatus
-from app.core.security import hash_password
 
 # ─── Configuration ────────────────────────────────────────────────
 
@@ -90,18 +88,10 @@ def main():
             db.commit()
             print("  ✓ Cleared")
 
-        # ─── 1. Create Users ────────────────────────────────────
-        print("\n[1/6] Creating users...")
-        if db.query(User).count() == 0:
-            users_data = [
-                ("System Admin", "admin@itbis.com", "admin123", UserRole.ADMINISTRATOR),
-                ("SOC Analyst", "analyst@itbis.com", "analyst123", UserRole.SECURITY_ANALYST),
-                ("Security Manager", "manager@itbis.com", "manager123", UserRole.SECURITY_MANAGER),
-            ]
-            users = [User(full_name=n, email=e, hashed_password=hash_password(p), role=r) for n, e, p, r in users_data]
-            db.add_all(users)
-            db.commit()
-            print("  ✓ admin@itbis.com / admin123")
+        # ─── 1. Users ───────────────────────────────────────────
+        # No demo credentials are seeded anymore. Accounts are created via
+        # Google OAuth (the first sign-in becomes the administrator).
+        print("\n[1/6] Users: skipped — log in via Google OAuth (first user becomes admin)")
 
         # ─── 2. Generate Employees ──────────────────────────────
         print("\n[2/6] Generating employees...")
@@ -335,7 +325,7 @@ def main():
         print(f"  Risk Scores:     {len(risk_scores)}")
         print(f"  Alerts:          {len(alerts)}")
         print(f"  Incidents:       {len(incidents)}")
-        print(f"  Users:           admin@itbis.com (admin123)")
+        print(f"  Users:           Google OAuth only (first sign-in becomes admin)")
         print(f"\n  Start: uvicorn app.main:app --reload")
         print(f"  Frontend: cd frontend && npm run dev")
 

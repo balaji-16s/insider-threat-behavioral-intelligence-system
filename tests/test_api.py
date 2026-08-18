@@ -140,3 +140,27 @@ def test_dashboard_stats(client, auth_headers):
         "high_risk_employees",
     ):
         assert key in data
+
+
+def test_anomaly_detection_endpoints(client, auth_headers, monkeypatch, tmp_path):
+    """Anomaly alert stats + cached latest detection endpoints."""
+    from app.services import anomaly_detection as ad
+
+    monkeypatch.setattr(ad, "DETECTION_CACHE", tmp_path / "detection.json")
+    headers = auth_headers()
+
+    stats = client.get("/api/v1/anomaly/alerts/stats", headers=headers)
+    assert stats.status_code == 200
+    assert "total_open" in stats.json()
+    assert "by_severity" in stats.json()
+
+    latest = client.get("/api/v1/anomaly/detect/latest", headers=headers)
+    assert latest.status_code == 200
+    assert latest.json() is None  # nothing cached yet in this isolated env
+
+    # After a detection run, the cached result is served.
+    client.post("/api/v1/anomaly/detect", headers=headers, json={"days": 30})
+    latest2 = client.get("/api/v1/anomaly/detect/latest", headers=headers)
+    assert latest2.status_code == 200
+    assert latest2.json()["scanned_employees"] == 0
+    assert latest2.json()["generated_at"]

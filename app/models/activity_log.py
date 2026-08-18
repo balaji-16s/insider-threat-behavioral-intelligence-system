@@ -1,7 +1,7 @@
 import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Enum, ForeignKey, JSON
+from sqlalchemy import Column, Index, String, DateTime, Enum, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.base import Base
 
@@ -17,6 +17,10 @@ class ActivityType(str, enum.Enum):
 
 class ActivityLog(Base):
     __tablename__ = "activity_logs"
+    __table_args__ = (
+        # Hot pattern: per-employee / chunked activity loads over a time window.
+        Index("ix_activity_logs_employee_occurred", "employee_id", "occurred_at"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     employee_id = Column(UUID(as_uuid=True), ForeignKey("employees.id"), nullable=False, index=True)
