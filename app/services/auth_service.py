@@ -18,7 +18,8 @@ def get_or_create_oauth_user(db: Session, email: str, full_name: str) -> User:
     user = get_user_by_email(db, email)
     if user:
         return user
-    random_password = secrets.token_urlsafe(32)
+    random_password = secrets.token_urlsafe(16)
+
     # Bootstrap: the very first account created (via Google OAuth) becomes
     # the administrator, since no demo credentials exist anymore.
     role = (

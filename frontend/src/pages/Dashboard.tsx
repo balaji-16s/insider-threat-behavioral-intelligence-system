@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useAuth } from '../context/AuthContext';
 import { getDashboardStats, getActivityTrends, type DashboardStats, type ActivityTrend } from '../api/dashboard';
 import { listAlerts, type Alert } from '../api/alerts';
 import { getRiskAnalytics, type RiskAnalytics } from '../api/riskScores';
@@ -22,13 +23,18 @@ const severityBg: Record<string, string> = {
 };
 
 function StatCard({
-  title, value, icon: Icon, color, trend, trendUp,
+  title, value, icon: Icon, color, trend, trendUp, onClick,
 }: {
   title: string; value: number | string; icon: typeof Users; color: string;
-  trend?: string; trendUp?: boolean;
+  trend?: string; trendUp?: boolean; onClick?: () => void;
 }) {
   return (
-    <div className="bg-surface-900 rounded-xl border border-surface-800 p-5 hover:border-surface-700 transition-all duration-200 group">
+    <div
+      onClick={onClick}
+      className={`bg-surface-900 rounded-xl border border-surface-800 p-5 transition-all duration-200 group ${
+        onClick ? 'cursor-pointer hover:border-cyber-500/50 hover:bg-surface-800/80 hover:shadow-lg hover:shadow-cyber-500/5' : 'hover:border-surface-700'
+      }`}
+    >
       <div className="flex items-start justify-between mb-3">
         <div className={`p-2.5 rounded-lg ${color} bg-opacity-10`}>
           <Icon className={`w-5 h-5 ${color}`} />
@@ -40,20 +46,40 @@ function StatCard({
           </div>
         )}
       </div>
-      <p className="text-2xl font-bold text-white">{value}</p>
+      <p className="text-2xl font-bold text-white flex items-center justify-between">
+        <span>{value}</span>
+        {onClick && <ChevronRight className="w-4 h-4 text-gray-600 group-hover:text-cyber-400 transition-colors" />}
+      </p>
       <p className="text-sm text-gray-500 mt-1">{title}</p>
     </div>
   );
 }
 
+
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  
+  const getInitialRoleView = (role?: string): 'all' | 'soc' | 'manager' | 'admin' => {
+    if (role === 'security_manager') return 'manager';
+    if (role === 'soc_engineer' || role === 'security_analyst') return 'soc';
+    return 'admin';
+  };
+
+  const [viewMode, setViewMode] = useState<'all' | 'soc' | 'manager' | 'admin'>(getInitialRoleView(user?.role));
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [trends, setTrends] = useState<ActivityTrend[]>([]);
   const [recentAlerts, setRecentAlerts] = useState<Alert[]>([]);
   const [riskAnalytics, setRiskAnalytics] = useState<RiskAnalytics | null>(null);
   const [topThreats, setTopThreats] = useState<ThreatAssessmentResult[]>([]);
   const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (user?.role) {
+      setViewMode(getInitialRoleView(user.role));
+    }
+  }, [user?.role]);
+
 
   useEffect(() => {
     async function load() {
@@ -78,8 +104,6 @@ export default function Dashboard() {
     }
     load();
   }, []);
-
-  const [viewMode, setViewMode] = useState<'all' | 'soc' | 'manager' | 'admin'>('all');
 
   if (loading) {
     return (
@@ -131,30 +155,31 @@ export default function Dashboard() {
       {/* Stats Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {(viewMode === 'all' || viewMode === 'admin') && (
-          <StatCard title="Total Employees" value={stats.total_employees} icon={Users} color="text-cyber-400" />
+          <StatCard title="Total Employees" value={stats.total_employees} icon={Users} color="text-cyber-400" onClick={() => navigate('/employees')} />
         )}
         {(viewMode === 'all' || viewMode === 'soc') && (
-          <StatCard title="Total Alerts" value={stats.total_alerts} icon={AlertTriangle} color="text-warning-400" />
+          <StatCard title="Total Alerts" value={stats.total_alerts} icon={AlertTriangle} color="text-warning-400" onClick={() => navigate('/alerts')} />
         )}
         {(viewMode === 'all' || viewMode === 'soc') && (
-          <StatCard title="Critical Alerts" value={stats.critical_alerts} icon={ShieldAlert} color="text-danger-400" />
+          <StatCard title="Critical Alerts" value={stats.critical_alerts} icon={ShieldAlert} color="text-danger-400" onClick={() => navigate('/alerts')} />
         )}
         {(viewMode === 'all' || viewMode === 'manager') && (
-          <StatCard title="High Risk Employees" value={stats.high_risk_employees} icon={BarChart3} color="text-danger-400" />
+          <StatCard title="High Risk Employees" value={stats.high_risk_employees} icon={BarChart3} color="text-danger-400" onClick={() => navigate('/risk-scores')} />
         )}
         {(viewMode === 'all' || viewMode === 'soc') && (
-          <StatCard title="Open Alerts" value={stats.open_alerts} icon={AlertTriangle} color="text-warning-400" />
+          <StatCard title="Open Alerts" value={stats.open_alerts} icon={AlertTriangle} color="text-warning-400" onClick={() => navigate('/alerts')} />
         )}
         {(viewMode === 'all' || viewMode === 'soc') && (
-          <StatCard title="Active Incidents" value={stats.active_incidents} icon={ShieldAlert} color="text-danger-400" />
+          <StatCard title="Active Incidents" value={stats.active_incidents} icon={ShieldAlert} color="text-danger-400" onClick={() => navigate('/incidents')} />
         )}
         {(viewMode === 'all' || viewMode === 'admin') && (
-          <StatCard title="Total Activity Logs" value={stats.total_activity_logs.toLocaleString()} icon={Activity} color="text-matrix-400" />
+          <StatCard title="Total Activity Logs" value={stats.total_activity_logs.toLocaleString()} icon={Activity} color="text-matrix-400" onClick={() => navigate('/activity-logs')} />
         )}
         {(viewMode === 'all' || viewMode === 'manager' || viewMode === 'admin') && (
-          <StatCard title="Total Incidents" value={stats.total_incidents} icon={ShieldAlert} color="text-cyber-400" />
+          <StatCard title="Total Incidents" value={stats.total_incidents} icon={ShieldAlert} color="text-cyber-400" onClick={() => navigate('/incidents')} />
         )}
       </div>
+
 
 
       {/* Charts */}

@@ -34,6 +34,8 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       - POSTGRES_USER=itbis_user
       - POSTGRES_PASSWORD=changeme
@@ -43,7 +45,6 @@ services:
       - DATABASE_URL=postgresql://itbis_user:changeme@postgres:5432/itbis_db
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - JWT_SECRET_KEY=production-secret-change-me
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,6 +59,8 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
+      - "5173:80"
+
     depends_on:
       - backend
 
