@@ -1,78 +1,78 @@
 # 🛡️ Insider Threat Behavioral Intelligence System (ITBIS)
 
-An **AI-powered insider threat detection platform** that continuously monitors employee activities, builds behavioral profiles, detects anomalies with machine learning, scores insider risk, and drives security investigations.
+An **AI-powered User and Entity Behavior Analytics (UEBA) platform** that continuously monitors employee activities, builds behavioral profiles, detects anomalies with machine learning, scores insider risk, and drives automated security response.
 
-Built with **FastAPI** + **React**, running on the **real CERT Insider Threat Test Dataset** (CMU SEI).
+Built with **FastAPI**, **React (Vite)**, **PostgreSQL**, **Redis**, and **Docker**, trained and evaluated on the **CMU SEI CERT Insider Threat Test Dataset**.
 
 ---
 
-## ✨ Features
+## ✨ Features & Core Capabilities
 
-### 🔐 Authentication & Role-Based Access
-- JWT authentication with bcrypt password hashing
-- **Google OAuth sign-in** ("Continue with Google") — set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` in `.env`; new Google users are provisioned automatically
-- 4 roles: `administrator`, `security_manager`, `soc_engineer`, `security_analyst`
-- Role-protected endpoints via dependency injection
+### 🔐 Authentication & Role-Based Access Control (RBAC)
+- JWT Authentication with bcrypt password hashing
+- **Google OAuth 2.0 Integration** ("Continue with Google")
+- 4 Role Levels: `administrator`, `security_manager`, `soc_engineer`, `security_analyst`
+- Pre-seeded Demo Credentials available for instant SOC testing
 
-### 👤 Employee Identity & Monitoring
-- Employee onboarding with department, designation, manager, device info & access privileges
-- **8 monitored activity types**: login, file download/upload, data transfer, email, privilege change, remote access, USB device
+### 👤 Employee Identity & Activity Telemetry
+- Comprehensive employee onboarding: department, designation, manager, access privileges
+- **8 Monitored Activity Types**: Login, File Download, File Upload, Data Transfer, Email, Privilege Escalation, Remote Access, USB Devices
 
 ### 🧠 Behavioral Profiling Engine
-- Per-employee behavioral baselines (activity distribution, hourly patterns, off-hours/weekend ratios, burst detection)
-- **Peer-group comparison** against department peers
+- Per-employee 30-day behavioral baselines (hourly patterns, off-hours/weekend ratios, burst activity)
+- **Department Peer Group Comparison** to spot statistical outliers
 
-### ⚡ Anomaly Detection (2 Engines)
-- **Statistical/rule-based**: Z-score, IQR, off-hours transfers, USB spikes, privilege escalation, large downloads, late-night & weekend patterns
-- **🤖 ML (Isolation Forest)**: unsupervised scikit-learn model on 14 behavioral features — **trained once on the dataset** (`python scripts/train_ml_model.py` or the *Retrain Model* button) and persisted to `data/models/`; scoring loads the trained model for inference instead of re-fitting on every run. Scores every employee 0–100 with explainable top deviating factors, plus ground-truth validation against known insider labels
+### ⚡ Anomaly Detection (Dual-Engine Architecture)
+- **Statistical / Rule-Based Engine**: Z-score, IQR, off-hours data transfers, USB spikes, privilege escalation
+- **🤖 ML Engine (Isolation Forest)**: Unsupervised scikit-learn model trained on 14 behavioral features, persisted to `data/models/`. Scores employees from 0–100 with top deviating factors
 
-### 🎯 Insider Risk Scoring
-- Weighted multi-model threat engine (data exfiltration, off-hours access, privilege abuse, policy violations, behavioral deviation)
-- Risk persisted with full breakdowns; org-wide analytics: trend, department breakdown, top contributors
+### 🎯 Insider Risk Scoring & UEBA Pipeline
+- Dynamic 0–100 threat score based on multi-dimensional behavioral deviations
+- **One-Click UEBA Pipeline**: Baselines → Anomaly Detection → Threat Assessment → Risk Persistence
 
-### 🕵️ UEBA Intelligence Pipeline
-- One-call pipeline: baselines → anomaly detection → threat assessment → risk persistence
-- Consolidated per-employee UEBA profiles
+### 🚨 Incident Investigation & Automated Mitigation Playbooks
+- Automated alert-to-incident escalation workflows
+- **Single-Click Mitigation Playbooks**: Lock User Account, Force MFA Challenge, Revoke Active Session
 
-### 🚨 Alerts & Incident Investigation
-- Severity levels (informational → critical), alert lifecycle, alert→incident escalation
-- Incident timelines with audited actors, status workflows, related-alert resolution
-
-### 📊 Dashboards & Reports
-- SOC dashboard (org risk trend, top insider threats, recent alerts, activity trends)
-- **13 frontend pages**: Login, Dashboard, Employees, Employee Detail, Activity Logs, UEBA Intelligence, Anomaly Detection (+ML tab), Behavioral Analysis, Alerts, Incidents, Incident Detail, Risk Scores, Anomaly Reports
+### 📊 SOC Dashboards & Reporting
+- Real-time SOC dashboard featuring 30-day activity trends, risk distribution heatmaps, and open incident counters
+- PDF and Excel exportable reports for security audits
 
 ---
 
-## 🗄️ Real Dataset — CERT Insider Threat Test Dataset (r1)
+## 🗄️ Real Dataset — CERT Insider Threat Dataset (r1)
 
-The platform runs on **real insider-threat data** from the CMU SEI CERT Insider Threat Test Dataset instead of synthetic data:
+The platform runs on **real insider threat data** from the CMU SEI CERT dataset:
 
-| Component | Source file | Volume |
+| Component | Source File | Volume |
 |-----------|-------------|--------|
-| 1,000 employees | `LDAP/*.csv` | real names, roles, emails |
-| Login events | `logon.csv` | 849K |
-| USB device events | `device.csv` | 65K |
-| Web/network events | `http.csv` | 3.45M |
-| **Total real events** | | **4.37M** |
+| 1,000 Employees | `LDAP/*.csv` | Real names, roles, emails |
+| Login Events | `logon.csv` | 849K events |
+| USB Device Events | `device.csv` | 65K events |
+| Web/Network Events | `http.csv` | 3.45M events |
+| **Total Real Telemetry** | | **4.37M Events** |
 
-CERT r1 only contains logon/device/http events. Run the enrichment script to add
-the other 5 monitored activity types (`file_download`, `file_upload`, `email`,
-`privilege_change`, `remote_access`) so all 8 types appear in every module:
+To enrich and ingest dataset:
 ```bash
 python scripts/enrich_activity.py
+python scripts/ingest_cert.py --all --clear
 ```
 
-- **Ground-truth insider labels** saved to `data/cert/insiders.json` for evaluating detection models
-- Timestamps are **rebased to the present** so the platform's 30-day analytics windows work with the 2010–2011 data (relative behavior is preserved; use `--no-rebase` to keep original dates)
-- Dataset license: free for research/educational use (see `data/cert/license.txt`)
-
-**Ingest the real data:**
+To seed demo user accounts:
 ```bash
-python scripts/ingest_cert.py --all            # download (87 MB) + extract + ingest
-python scripts/ingest_cert.py --all --clear    # replace existing data
-python scripts/ingest_cert.py --all --max-users 200   # smaller subset
+python scripts/seed_demo_users.py
 ```
+
+---
+
+## 🔑 Pre-Seeded Demo Credentials
+
+| Role | Email | Password |
+| :--- | :--- | :--- |
+| **Administrator** | `admin@itbis.com` | `Password123!` |
+| **Security Manager** | `manager@itbis.com` | `Password123!` |
+| **SOC Engineer** | `soc@itbis.com` | `Password123!` |
+| **Security Analyst** | `analyst@itbis.com` | `Password123!` |
 
 ---
 
@@ -80,12 +80,12 @@ python scripts/ingest_cert.py --all --max-users 200   # smaller subset
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Python · FastAPI · SQLAlchemy 2 · Alembic |
-| AI/ML | scikit-learn (Isolation Forest) · NumPy |
-| Database | PostgreSQL 16 · Redis 7 |
-| Auth | JWT (python-jose) · Passlib (bcrypt) |
-| Frontend | React 19 · TypeScript · Vite · Tailwind CSS 4 · Recharts · lucide-react |
-| Infrastructure | Docker Compose |
+| **Backend API** | Python 3.11+ · FastAPI · SQLAlchemy 2 · Alembic |
+| **AI / ML Engine** | scikit-learn (Isolation Forest) · NumPy · pandas |
+| **Database & Cache** | PostgreSQL 16 · Redis 7 |
+| **Auth & Security** | JWT (python-jose) · Passlib (bcrypt) · OAuth2 |
+| **Frontend UI** | React 19 · TypeScript · Vite · Tailwind CSS · Recharts |
+| **Infrastructure** | Docker · Docker Compose |
 
 ---
 
@@ -93,136 +93,69 @@ python scripts/ingest_cert.py --all --max-users 200   # smaller subset
 
 ```text
 ├── app/
-│   ├── api/v1/            # Routers: auth, employees, activity_logs, alerts,
-│   │                      #   incidents, risk_scores, dashboard, anomaly, reports, ueba
-│   ├── core/              # config.py, security.py (JWT/hashing), deps.py (auth/RBAC)
-│   ├── db/base.py         # Engine, SessionLocal, Base
-│   ├── models/            # 7 tables: User, Employee, ActivityLog, BehavioralBaseline,
-│   │                      #   RiskScore, Alert, Incident
-│   ├── schemas/           # Pydantic request/response models
-│   ├── services/          # auth, behavioral_profiling, anomaly_detection,
-│   │                      #   ml_anomaly_detection, threat_detection, risk_scoring,
-│   │                      #   ueba, report_service, report_export (PDF/Excel)
-│   └── main.py            # FastAPI app entrypoint
-├── frontend/src/
-│   ├── pages/             # 13 pages (Dashboard … IncidentDetail)
-│   ├── api/               # typed API clients
-│   ├── components/        # Layout, ProtectedRoute
-│   └── context/           # AuthContext
+│   ├── api/v1/            # API Endpoints: auth, employees, activity_logs, alerts,
+│   │                      #   incidents, risk_scores, dashboard, anomaly, ueba
+│   ├── core/              # config.py, security.py (JWT/hashing), deps.py (RBAC)
+│   ├── db/base.py         # SQLAlchemy Engine & SessionLocal
+│   ├── models/            # Database Models: User, Employee, ActivityLog,
+│   │                      #   BehavioralBaseline, RiskScore, Alert, Incident
+│   ├── schemas/           # Pydantic schemas
+│   └── services/          # Profiling, Anomaly Engine, ML Engine, Risk Scoring, UEBA
+├── frontend/              # React 19 + Vite SOC Dashboard Application
 ├── scripts/
-│   ├── ingest_cert.py     # Real CERT dataset ingestion
-│   └── seed_data.py       # Synthetic demo data generator (fallback)
-├── alembic/               # DB migrations
-├── docker-compose.yml     # PostgreSQL + Redis
+│   ├── ingest_cert.py     # CERT dataset ingestion script
+│   ├── seed_demo_users.py # Demo user credentials seeder
+│   └── train_ml_model.py  # Isolation Forest ML model trainer
+├── docker-compose.yml     # Multi-container orchestration (Backend, Frontend, Postgres, Redis)
 └── requirements.txt
 ```
 
 ---
 
-## 🚀 Getting Started
+## 🚀 Quick Start Guide
 
-### 1. Prerequisites
-- Python 3.11+ · Node 18+ · Docker & Docker Compose
+### 1. Launch with Docker (Recommended)
 
-### 2. Environment
 ```bash
-cp .env.example .env
-docker compose up -d          # PostgreSQL (:5433) + Redis (:6379)
-# Optional: enable Google OAuth by filling in GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
-# and GOOGLE_REDIRECT_URI (create an OAuth 2.0 Client ID at Google Cloud Console).
+# Clone the repository
+git clone https://github.com/balaji-16s/insider-threat-behavioral-intelligence-system.git
+cd insider-threat-behavioral-intelligence-system
+
+# Start all 4 containers (Backend, Frontend, Postgres, Redis)
+docker compose up -d --build
 ```
 
-### 3. Backend
+- **Frontend Dashboard:** `http://localhost:5173`
+- **FastAPI OpenAPI Docs:** `http://localhost:8000/docs`
+
+### 2. Manual Local Setup
+
 ```bash
+# Backend Setup
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-alembic upgrade head          # create the 7 tables
-python scripts/ingest_cert.py --all --clear   # load real CERT data
-uvicorn app.main:app --reload                 # http://127.0.0.1:8000/docs
-```
+alembic upgrade head
+python scripts/seed_demo_users.py
+uvicorn app.main:app --reload
 
-### 4. Frontend
-```bash
+# Frontend Setup (in a new terminal tab)
 cd frontend
 npm install
-npm run dev                   # http://localhost:5173
+npm run dev
 ```
-
-### 5. Accounts (Google OAuth only)
-There are **no demo credentials** — all accounts sign in with **Continue with Google**.
-The first Google sign-in automatically becomes the **Administrator**; later sign-ins
-are provisioned as **Security Analysts**. (Roles map to the 3 documented logins:
-`administrator`, `security_manager`, `security_analyst` — adjust roles in the DB if needed.)
-
-### 6. First Run Workflow
-1. Log in → Dashboard shows org risk posture & top threats
-2. **UEBA Intelligence** → *Run Pipeline* to refresh baselines/anomalies/risk
-3. **Anomaly Detection → ML Detection tab** → *Run ML Detection* (Isolation Forest)
-4. **Risk Scores** → *Recalculate* + explore analytics
-5. **Alerts** → escalate to an incident → **Incidents** → investigate via timeline
-
----
-
-## 🔌 Key API Endpoints
-
-| Area | Endpoints |
-|------|-----------|
-| Auth | `POST /api/v1/auth/register` · `POST /api/v1/auth/login` · `GET/PUT /api/v1/auth/me` |
-| Employees | `GET/POST /api/v1/employees` · `GET/PUT/DELETE /api/v1/employees/{id}` · stats |
-| Activity | `GET/POST /api/v1/activity-logs` · `POST /api/v1/activity-logs/bulk` |
-| Anomaly | `POST /api/v1/anomaly/detect` · `POST /api/v1/anomaly/ml/detect` · `GET /api/v1/anomaly/ml/results` · `POST /api/v1/anomaly/baselines/compute` · `GET /api/v1/anomaly/threat/top` |
-| Risk | `POST /api/v1/risk-scores/calculate` · `GET /api/v1/risk-scores/analytics` · `GET /api/v1/risk-scores/distribution` |
-| UEBA | `POST /api/v1/ueba/pipeline` · `GET /api/v1/ueba/overview` · `GET /api/v1/ueba/overview/{employee_id}` |
-| Alerts | `GET/POST /api/v1/alerts` · `PATCH /api/v1/alerts/{id}` · `POST /api/v1/alerts/{id}/escalate` |
-| Incidents | `GET/POST /api/v1/incidents` · `PATCH /api/v1/incidents/{id}` · `POST /api/v1/incidents/{id}/timeline` · `GET /api/v1/incidents/{id}/related-alerts` |
-| Notifications | `GET /api/v1/notifications` · `POST /api/v1/notifications/send` |
-| Reports | `GET /api/v1/reports/anomaly` · `GET /api/v1/reports/employee/{employee_id}` · **PDF/Excel export**: `/anomaly/pdf` · `/anomaly/xlsx` · `/employee/{id}/pdf` · `/employee/{id}/xlsx` |
-| Dashboard | `GET /api/v1/dashboard/stats` · `GET /api/v1/dashboard/recent-alerts` · `GET /api/v1/dashboard/activity-trends` |
 
 ---
 
 ## 🧪 Testing
 
-46 automated tests cover the core engine, notifications, and API workflows (run against a dedicated `itbis_test` PostgreSQL database):
-
-*   **Auth & RBAC & Profile** — registration, login, token auth, user profile update (`/auth/me`), role restrictions (403s)
-*   **Anomaly detection** — rule-based off-hours exfiltration, quiet-user negatives, threat scoring
-*   **Risk scoring** — score persistence, engine-score replacement, analytics
-*   **ML engine** — Isolation Forest flags seeded insiders, no-activity exclusion, 0-100 range
-*   **Notifications** — multi-channel alert dispatch (email/webhook/in-app) and audit logging
-*   **Report export** — valid PDF/Excel magic bytes for org & employee reports
-*   **API workflows** — employee CRUD, bulk activity ingestion, alert escalation, dashboard stats
-
-
+Run full automated test suite (46 passing pytest tests):
 ```bash
-# requires Docker Compose services running (PostgreSQL :5433)
 venv/bin/python -m pytest
 ```
-
-## 📈 Performance Notes
-
-- The UEBA pipeline (baselines → anomalies → risk scores) is **manual**: click **Run UEBA Pipeline** / **Recalculate Scores** to refresh. Baselines are batched (chunked activity loading + single-SQL department peer stats) so the whole pipeline completes in a few minutes at 1,000 employees / 4.4M+ events
-- ML anomaly detection scores 1,000 employees in ~15 seconds using the persisted trained model (no per-run re-fitting); retrain with `python scripts/train_ml_model.py` or the **Retrain Model** button
-- Reports, top-threats and risk pages all read the **same persisted risk scores**, so every module shows identical numbers; org reports are cached 60s and export fast
-
----
-
-## 🔭 Roadmap
-
-- [x] Milestone 1 — Auth, employee mgmt, activity monitoring, real data ingestion
-- [x] Milestone 2 — Behavioral profiling, anomaly detection, threat models
-- [x] Milestone 3 — Risk scoring, UEBA pipeline, investigation workflows
-- [x] **ML anomaly detection (Isolation Forest)**
-- [x] PDF/Excel report export (reportlab + openpyxl, download buttons on Anomaly Reports page)
-- [x] Automated tests (pytest — 46 tests passing across auth, engines, notifications, exports, API)
-- [x] Docker images for full app + CI/CD (GitHub Actions `.github/workflows/ci.yml`)
-- [x] Notification & escalation system (email/webhook notification dispatch service)
-- [x] User Profile Management API (`GET/PUT /api/v1/auth/me`) & Role-Based Dashboard Views
-
 
 ---
 
 ## ⚠️ Disclaimer
 
-Built for research & educational purposes. The CERT dataset contains simulated (realistic but fictional) employee activity. Do not use for production security decisions without proper validation.
+Built for research and educational purposes. Uses simulated activity data from the CMU SEI CERT dataset. Do not deploy for production security decisions without proper validation.
