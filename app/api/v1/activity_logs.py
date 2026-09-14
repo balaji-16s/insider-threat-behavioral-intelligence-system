@@ -8,7 +8,7 @@ from app.db.base import get_db
 from app.models.activity_log import ActivityLog
 from app.models.employee import Employee
 from app.schemas.activity_log import ActivityLogCreate, ActivityLogOut, ActivityLogBulkCreate
-from app.core.deps import get_current_user
+from app.core.deps import require_staff
 from app.models.user import User
 
 router = APIRouter(prefix="/api/v1/activity-logs", tags=["Activity Logs"])
@@ -24,7 +24,7 @@ def list_activity_logs(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     query = db.query(ActivityLog)
     if employee_id:
@@ -44,7 +44,7 @@ def list_activity_logs(
 def get_activity_log(
     log_id: uuid.UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     log = db.query(ActivityLog).filter(ActivityLog.id == log_id).first()
     if not log:
@@ -56,7 +56,7 @@ def get_activity_log(
 def create_activity_log(
     log_in: ActivityLogCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     employee = db.query(Employee).filter(Employee.id == log_in.employee_id).first()
     if not employee:
@@ -78,7 +78,7 @@ def create_activity_log(
 def bulk_create_activity_logs(
     bulk_in: ActivityLogBulkCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     logs = []
     for log_in in bulk_in.logs:

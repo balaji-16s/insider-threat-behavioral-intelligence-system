@@ -11,7 +11,7 @@ from app.models.alert import Alert
 from app.models.incident import Incident
 from app.models.risk_score import RiskScore, RiskLevel
 from app.schemas.dashboard import DashboardStats
-from app.core.deps import get_current_user
+from app.core.deps import require_staff
 from app.models.user import User
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["Dashboard"])
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/v1/dashboard", tags=["Dashboard"])
 @router.get("/stats", response_model=DashboardStats)
 def get_dashboard_stats(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     total_employees = db.query(func.count(Employee.id)).scalar() or 0
     total_alerts = db.query(func.count(Alert.id)).scalar() or 0
@@ -60,7 +60,7 @@ def get_dashboard_stats(
 @router.get("/recent-alerts")
 def get_recent_alerts(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     return (
         db.query(Alert)
@@ -73,7 +73,7 @@ def get_recent_alerts(
 @router.get("/activity-trends")
 def get_activity_trends(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     from datetime import timedelta
     from sqlalchemy import cast, Date

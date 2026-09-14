@@ -24,6 +24,20 @@ from app.services.google_oauth import (
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
+
+def _claims_for(user: User) -> dict:
+    """JWT claims for a user.
+
+    ``employee_id`` is included so the frontend can route portal logins
+    straight to their own dashboard, and so worker endpoints can use the
+    token as the source of truth for whose data may be read.
+    """
+    return {
+        "sub": user.email,
+        "role": user.role.value,
+        "employee_id": str(user.employee_id) if user.employee_id else None,
+    }
+
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 def register(user_in: UserCreate, db: Session = Depends(get_db)):
     if get_user_by_email(db, user_in.email):
@@ -35,7 +49,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     user = authenticate_user(db, form_data.username, form_data.password)
     if not user:
         raise HTTPException(status_code=401, detail="Incorrect email or password")
-    token = create_access_token(data={"sub": user.email, "role": user.role.value})
+    token = create_access_token(data=_claims_for(user))
     return Token(access_token=token)
 
 @router.get("/google/login")
@@ -82,9 +96,7 @@ def google_callback(
 
     name = (profile.get("name") or "").strip()
     user = get_or_create_oauth_user(db, email, name)
-    token = create_access_token(
-        data={"sub": user.email, "role": user.role.value}
-    )
+    token = create_access_token(data=_claims_for(user))
     return RedirectResponse(
         f"{frontend}/oauth/callback#access_token={token}", status_code=302
     )

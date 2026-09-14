@@ -12,6 +12,7 @@ from app.api.v1.anomaly import router as anomaly_router
 from app.api.v1.reports import router as reports_router
 from app.api.v1.ueba import router as ueba_router
 from app.api.v1.notifications import router as notifications_router
+from app.api.v1.worker import router as worker_router
 
 app = FastAPI(title=settings.app_name)
 
@@ -34,6 +35,7 @@ app.include_router(anomaly_router)
 app.include_router(reports_router)
 app.include_router(ueba_router)
 app.include_router(notifications_router)
+app.include_router(worker_router)
 
 
 

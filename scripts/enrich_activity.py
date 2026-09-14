@@ -22,9 +22,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from sqlalchemy.orm import Session  # noqa: E402
+
 from app.db.base import SessionLocal  # noqa: E402
 from app.models.employee import Employee  # noqa: E402
 from app.models.activity_log import ActivityLog, ActivityType  # noqa: E402
+
+# The activity types the CERT r1 release does not contain — the ones this
+# script is responsible for. Kept here so callers (e.g. refresh_dataset.py)
+# can identify previously enriched rows without duplicating the list.
+ENRICHED_TYPES = (
+    ActivityType.FILE_DOWNLOAD,
+    ActivityType.FILE_UPLOAD,
+    ActivityType.EMAIL,
+    ActivityType.PRIVILEGE_CHANGE,
+    ActivityType.REMOTE_ACCESS,
+)
 
 FILE_NAMES = [
     "quarterly_report", "project_plan", "budget_2026", "audit_findings",
@@ -39,6 +52,88 @@ EMAIL_DOMAINS = ["company.com", "partner.com", "client.com", "vendor.com"]
 REMOTE_PLATFORMS = ["vpn", "remote-desktop", "cloud-portal", "sso-portal"]
 
 
+def enrich_activity(
+    db: Session,
+    days: int = 30,
+    events_per_day: int = 4,
+    end_at: datetime | None = None,
+    seed: int = 20260816,
+    verbose: bool = True,
+) -> int:
+    """Synthesize the 5 non-CERT activity types over the last ``days`` days.
+
+    Generates events for every employee, ending at ``end_at`` (defaults to
+    now), and returns the number of events inserted. Deterministic for a
+    given ``seed`` so re-runs are reproducible.
+    """
+    rng = random.Random(seed)  # deterministic
+    end = end_at or datetime.utcnow()
+
+    employees = db.query(Employee).all()
+    if not employees:
+        raise RuntimeError("No employees found. Ingest the CERT dataset first.")
+
+    if verbose:
+        print(f"Enriching activity for {len(employees)} employees over {days} days...")
+    batch: list[ActivityLog] = []
+    total = 0
+
+    for idx, emp in enumerate(employees):
+        # Slight per-employee variation so volumes look organic.
+        per_day = max(1, events_per_day + rng.randint(-1, 2))
+        for day_ago in range(days):
+            day = end - timedelta(days=day_ago)
+            for _ in range(per_day):
+                atype = rng.choices(
+                    list(ENRICHED_TYPES),
+                    weights=[30, 18, 32, 3, 17],
+                )[0]
+
+                # Mostly business hours, ~8% off-hours, some late night.
+                if rng.random() < 0.08:
+                    hour = rng.randint(1, 5)
+                else:
+                    hour = rng.randint(8, 19)
+                occurred = day.replace(
+                    hour=hour,
+                    minute=rng.randint(0, 59),
+                    second=rng.randint(0, 59),
+                )
+                # Never generate telemetry later than the anchor instant, so
+                # the dataset stays anchored to "now" instead of drifting
+                # into the future on the most recent day.
+                if occurred > end:
+                    occurred = end - timedelta(seconds=rng.randint(1, 300))
+
+                details = _details_for(atype, rng)
+                batch.append(
+                    ActivityLog(
+                        employee_id=emp.id,
+                        activity_type=atype,
+                        source=details.pop("_source", "enriched"),
+                        details=details,
+                        occurred_at=occurred,
+                    )
+                )
+                total += 1
+
+                if len(batch) >= 20000:
+                    db.bulk_save_objects(batch)
+                    db.commit()
+                    batch = []
+                    if verbose:
+                        print(f"    {total:>9,} events inserted...")
+
+        if verbose and (idx + 1) % 200 == 0:
+            print(f"    {idx + 1}/{len(employees)} employees done")
+
+    if batch:
+        db.bulk_save_objects(batch)
+        db.commit()
+
+    return total
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Enrich activity logs with the 5 missing activity types.")
     parser.add_argument("--days", type=int, default=30, help="How many days back to synthesize events (default: 30)")
@@ -46,77 +141,21 @@ def main() -> None:
                         help="Base events per employee per day (default: 4)")
     args = parser.parse_args()
 
-    rng = random.Random(20260816)  # deterministic
-    now = datetime.utcnow()
-
     db = SessionLocal()
     try:
-        employees = db.query(Employee).all()
+        employees = db.query(Employee).count()
         if not employees:
             print("✗ No employees found. Ingest the CERT dataset first.")
             return
 
-        print(f"Enriching activity for {len(employees)} employees over {args.days} days...")
-        batch: list[ActivityLog] = []
-        total = 0
-
-        for idx, emp in enumerate(employees):
-            # Slight per-employee variation so volumes look organic.
-            per_day = max(1, args.events_per_day + rng.randint(-1, 2))
-            for day_ago in range(args.days):
-                day = now - timedelta(days=day_ago)
-                for _ in range(per_day):
-                    atype = rng.choices(
-                        [
-                            ActivityType.FILE_DOWNLOAD,
-                            ActivityType.FILE_UPLOAD,
-                            ActivityType.EMAIL,
-                            ActivityType.PRIVILEGE_CHANGE,
-                            ActivityType.REMOTE_ACCESS,
-                        ],
-                        weights=[30, 18, 32, 3, 17],
-                    )[0]
-
-                    # Mostly business hours, ~8% off-hours, some late night.
-                    if rng.random() < 0.08:
-                        hour = rng.randint(1, 5)
-                    else:
-                        hour = rng.randint(8, 19)
-                    occurred = day.replace(
-                        hour=hour,
-                        minute=rng.randint(0, 59),
-                        second=rng.randint(0, 59),
-                    )
-
-                    details = _details_for(atype, rng)
-                    batch.append(
-                        ActivityLog(
-                            employee_id=emp.id,
-                            activity_type=atype,
-                            source=details.pop("_source", "enriched"),
-                            details=details,
-                            occurred_at=occurred,
-                        )
-                    )
-                    total += 1
-
-                    if len(batch) >= 20000:
-                        db.bulk_save_objects(batch)
-                        db.commit()
-                        batch = []
-                        print(f"    {total:>9,} events inserted...")
-
-            if (idx + 1) % 200 == 0:
-                print(f"    {idx + 1}/{len(employees)} employees done")
-
-        if batch:
-            db.bulk_save_objects(batch)
-            db.commit()
+        total = enrich_activity(
+            db, days=args.days, events_per_day=args.events_per_day
+        )
 
         print("=" * 60)
         print("  ✅ ACTIVITY ENRICHMENT COMPLETE")
         print("=" * 60)
-        print(f"  Employees:       {len(employees)}")
+        print(f"  Employees:       {employees}")
         print(f"  New events:      {total:,} ({args.days}-day window)")
         print("  Types added:     file_download, file_upload, email,")
         print("                   privilege_change, remote_access")

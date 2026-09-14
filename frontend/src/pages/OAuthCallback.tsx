@@ -19,8 +19,9 @@ export default function OAuthCallback() {
 
     if (token) {
       try {
-        loginWithToken(token);
-        window.location.href = '/dashboard';
+        const session = loginWithToken(token);
+        window.location.href =
+          session.role === 'employee' ? '/my-dashboard' : '/dashboard';
         return;
       } catch {
         setError('Could not validate the Google sign-in token.');

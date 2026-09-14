@@ -8,6 +8,9 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     role: UserRole = UserRole.SECURITY_ANALYST
+    # Required when creating a UserRole.EMPLOYEE account, so the portal
+    # knows whose behaviour the login is allowed to display.
+    employee_id: Optional[uuid.UUID] = None
 
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
@@ -23,6 +26,7 @@ class UserOut(BaseModel):
     full_name: str
     email: EmailStr
     role: UserRole
+    employee_id: Optional[uuid.UUID] = None
     is_active: bool
 
     class Config:

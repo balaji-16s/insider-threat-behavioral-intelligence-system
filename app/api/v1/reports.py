@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from app.db.base import get_db
-from app.core.deps import get_current_user
+from app.core.deps import require_staff
 from app.models.user import User
 
 from app.schemas.anomaly import AnomalyReport, EmployeeReport
@@ -27,7 +27,7 @@ def get_anomaly_report(
     days: int = Query(30, ge=1, le=365),
     include_threats: bool = Query(True),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Generate a comprehensive anomaly report for the organization."""
     report = generate_anomaly_report(
@@ -41,7 +41,7 @@ def get_employee_report(
     employee_id: str,
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Generate a focused anomaly report for a specific employee."""
     report = generate_employee_report(db, employee_id, days)
@@ -57,7 +57,7 @@ def get_employee_report(
 def export_anomaly_pdf(
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Download the organization anomaly report as a PDF."""
     pdf = anomaly_report_pdf_bytes(db, days)
@@ -72,7 +72,7 @@ def export_anomaly_pdf(
 def export_anomaly_xlsx(
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Download the organization anomaly report as an Excel workbook."""
     xlsx = anomaly_report_xlsx_bytes(db, days)
@@ -88,7 +88,7 @@ def export_employee_pdf(
     employee_id: str,
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Download a single-employee report as a PDF."""
     try:
@@ -107,7 +107,7 @@ def export_employee_xlsx(
     employee_id: str,
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Download a single-employee report as an Excel workbook."""
     try:

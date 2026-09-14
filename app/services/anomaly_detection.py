@@ -9,22 +9,24 @@ alert generation.
 from __future__ import annotations
 
 import json
-import math
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from statistics import mean, stdev, median
+from statistics import median, stdev
 from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.employee import Employee
-from app.models.activity_log import ActivityLog, ActivityType
+from app.models.activity_log import ActivityType
 from app.models.alert import Alert, AlertSeverity, AlertStatus
-from app.models.risk_score import RiskScore, RiskLevel
-from app.services.behavioral_profiling import compute_baseline
+from app.services.activity_aggregates import (
+    EmployeeActivity,
+    load_employee_activity,
+)
 from app.services.notification_service import notify_threat_alert
+from app.services.threat_detection import Cohort, get_cohort
 
 
 
@@ -32,6 +34,19 @@ from app.services.notification_service import notify_threat_alert
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 DETECTION_CACHE = DATA_DIR / "detection_results.json"
+
+# A day is a volume anomaly only when it clears both bars:
+#
+#   1. It is busier than the 95th percentile of *every* employee's busiest
+#      day, so it stands out against peers and not merely against the
+#      employee's own (often very spiky) history.
+#   2. It is at least this multiple of that employee's own typical day, so a
+#      routine fluctuation on a quiet account is not reported.
+#
+# A robust z-score is still computed and recorded as evidence, but it is not
+# a gate: when an employee's volume is steady the MAD is tiny, the z inflates
+# without limit, and it flagged a busy day for ~91% of the organization.
+VOLUME_MIN_MULTIPLE = 2.0
 
 
 def _cache_detection_result(result: dict[str, Any]) -> None:
@@ -112,28 +127,25 @@ def run_anomaly_detection(
     else:
         employees = db.query(Employee).all()
 
+    # Aggregate activity in SQL once instead of materialising every log row
+    # for the window, requesting only the aggregates the rules consume.
+    activity = load_employee_activity(
+        db,
+        [e.id for e in employees],
+        cutoff,
+        sections={"daily", "downloads", "devices", "off_hours_dates"},
+    )
+
+    # Peer distribution, so rule thresholds adapt to the dataset's actual
+    # scale. Fixed thresholds are calibrated for human-scale activity and
+    # fire for every employee on a large dataset, drowning the real signal.
+    cohort = get_cohort(db, days)
+
     results: list[dict[str, Any]] = []
     alerts_created = 0
 
-    for chunk in _chunks(employees, 20):
+    for chunk in _chunks(employees, 500):
         chunk_ids = [e.id for e in chunk]
-
-        # One query per chunk: all activity for these employees in the window.
-        logs_by_employee: dict[str, list[Any]] = defaultdict(list)
-        for log in (
-            db.query(
-                ActivityLog.employee_id,
-                ActivityLog.activity_type,
-                ActivityLog.occurred_at,
-                ActivityLog.details,
-            )
-            .filter(
-                ActivityLog.employee_id.in_(chunk_ids),
-                ActivityLog.occurred_at >= cutoff,
-            )
-            .all()
-        ):
-            logs_by_employee[str(log.employee_id)].append(log)
 
         # One query per chunk: existing open anomaly alerts for dedup.
         existing_by_employee: dict[str, set[tuple[str, str]]] = defaultdict(set)
@@ -150,9 +162,8 @@ def run_anomaly_detection(
                 existing_by_employee[str(emp_id)].add((atype, title))
 
         for emp in chunk:
-            anomalies = _detect_anomalies(
-                logs_by_employee.get(str(emp.id), []), days
-            )
+            acts = activity.get(str(emp.id))
+            anomalies = _detect_anomalies(acts, days, cohort) if acts else []
             if anomalies:
                 results.append(
                     {
@@ -176,7 +187,11 @@ def run_anomaly_detection(
         "details": results,
         "generated_at": datetime.utcnow().isoformat(),
     }
-    _cache_detection_result(result)
+    # Only a whole-org run is a meaningful "latest detection" for the UI — a
+    # single-employee scoped run must not overwrite the shared cache with a
+    # one-row result.
+    if employee_id is None:
+        _cache_detection_result(result)
     return result
 
 
@@ -213,58 +228,152 @@ def get_anomaly_summary(
 # ── Detection Pipeline ──────────────────────────────────────────
 
 
+def _peer_threshold(
+    cohort: Cohort | None, metric: str, absolute_floor: float
+) -> tuple[float, dict[str, Any]]:
+    """Threshold for a rule: the peer 95th percentile, floored absolutely.
+
+    A rule fires only when the employee is genuinely unusual *relative to
+    their peers*, so the same rule stays meaningful whether the window
+    holds a handful of events or several million. The absolute floor keeps
+    unmistakable behaviour (e.g. any off-hours exfiltration at all) from
+    being normalised away in a very active dataset.
+
+    Returns ``(threshold, evidence)``; the evidence is attached to the
+    alert so an analyst can see what the rule compared against.
+    """
+    if cohort is not None and cohort.mode == "relative":
+        bounds = cohort.bounds(metric)
+        if bounds:
+            med, p95 = bounds
+            if p95 <= med:
+                # Every employee looks the same on this signal, so it
+                # cannot distinguish anyone. Never fire rather than raise
+                # a pointless alert against the whole organization.
+                return float("inf"), {
+                    "peer_median": round(med, 2),
+                    "peer_p95": round(p95, 2),
+                    "note": "signal does not vary across peers; rule disabled",
+                }
+            threshold = max(absolute_floor, p95)
+            return threshold, {
+                "peer_median": round(med, 2),
+                "peer_p95": round(p95, 2),
+                "absolute_floor": absolute_floor,
+                "threshold": round(threshold, 2),
+            }
+    return absolute_floor, {
+        "absolute_floor": absolute_floor,
+        "threshold": absolute_floor,
+    }
+
+
+def _volume_severity(count: float, med: float) -> AlertSeverity:
+    """Severity from how much busier the day is than a normal day.
+
+    Keyed on magnitude rather than the raw robust z-score: when an
+    employee's volume is steady the MAD is small, robust z inflates, and a
+    z-based band labelled hundreds of routine swings as critical.
+    """
+    if med <= 0:
+        return AlertSeverity.MEDIUM
+    ratio = count / med
+    if ratio >= 3:
+        return AlertSeverity.CRITICAL
+    if ratio >= 2:
+        return AlertSeverity.HIGH
+    return AlertSeverity.MEDIUM
+
+
+def _confidence(value: float, threshold: float) -> float:
+    """Confidence ramps from 0.5 at the threshold to 1.0 at twice it."""
+    if threshold <= 0:
+        return 1.0
+    return round(min(1.0, (value / threshold) / 2.0), 3)
+
+
 def _detect_anomalies(
-    logs: list[Any], lookback_days: int
+    activity: EmployeeActivity,
+    lookback_days: int,
+    cohort: Cohort | None = None,
 ) -> list[dict[str, Any]]:
     """Run all detection methods and return a consolidated list."""
     anomalies: list[dict[str, Any]] = []
 
-    anomalies.extend(_statistical_anomalies(logs, lookback_days))
-    anomalies.extend(_rule_based_anomalies(logs, lookback_days))
-    anomalies.extend(_temporal_anomalies(logs, lookback_days))
+    anomalies.extend(_statistical_anomalies(activity, lookback_days, cohort))
+    anomalies.extend(_rule_based_anomalies(activity, lookback_days, cohort))
+    anomalies.extend(_temporal_anomalies(activity, lookback_days, cohort))
 
     return anomalies
 
 
 def _statistical_anomalies(
-    logs: list[Any], days: int
+    activity: EmployeeActivity,
+    days: int,
+    cohort: Cohort | None = None,
 ) -> list[dict[str, Any]]:
-    """Z-score and IQR based anomaly detection on activity volumes."""
-    if len(logs) < 10:
+    """Robust z-score and IQR based anomaly detection on activity volumes.
+
+    ``cohort`` provides the peer distribution used to decide whether a
+    unusually busy day is also unusual by peer standards.
+    """
+    if activity.total_logs < 10:
         return []
 
     found: list[dict[str, Any]] = []
 
-    # ── Daily volume anomaly (Z-score) ──────────────────────
-    daily = Counter(
-        log.occurred_at.strftime("%Y-%m-%d") for log in logs
-    )
+    # ── Daily volume anomaly (robust z-score) ───────────────
+    daily = activity.daily_counts
     counts = list(daily.values())
     if len(counts) >= 5:
-        m = mean(counts)
-        s = stdev(counts) if len(counts) > 1 else 1
+        med = median(counts)
+        mad = median([abs(c - med) for c in counts])
+        if mad > 0:
+            scale = mad
+        elif len(counts) > 1:
+            scale = stdev(counts)
+        else:
+            scale = 0.0
 
-        for day, count in sorted(daily.items()):
-            z = (count - m) / max(s, 0.01)
-            if z > 2.5:
-                found.append(
-                    {
-                        "type": "volume_anomaly",
-                        "description": f"Unusually high activity on {day}: {count} events (Z={z:.2f})",
-                        "confidence": min(1.0, (z - 2.5) / 3.0),
-                        "severity": _z_to_severity(z),
-                        "evidence": {
-                            "date": day,
-                            "event_count": count,
-                            "z_score": round(z, 2),
-                            "mean": round(m, 1),
-                            "std": round(s, 1),
-                        },
-                    }
-                )
+        # A day must also be a busy day by peer standards. Without this, an
+        # employee whose own volume is spiky gets flagged repeatedly: the
+        # test only asks whether the day is unusual for *them*, and in this
+        # dataset that is true for almost everybody.
+        peak_threshold, peak_ctx = _peer_threshold(
+            cohort, "peak_daily_volume", 1000
+        )
+
+        if scale > 0:
+            for day, count in sorted(daily.items()):
+                # 0.6745 rescales MAD onto the same footing as a std dev.
+                z = 0.6745 * (count - med) / scale
+                if (
+                    count >= med * VOLUME_MIN_MULTIPLE
+                    and count >= peak_threshold
+                ):
+                    day_key = day.strftime("%Y-%m-%d")
+                    found.append(
+                        {
+                            "type": "volume_anomaly",
+                            "description": f"Unusually high activity on {day_key}: {count} events (robust Z={z:.2f})",
+                            "confidence": min(
+                                1.0, count / max(peak_threshold, 1.0) / 2.0
+                            ),
+                            "severity": _volume_severity(count, med),
+                            "evidence": {
+                                "date": day_key,
+                                "event_count": count,
+                                "z_score": round(z, 2),
+                                "median": round(med, 1),
+                                "med_multiple": round(count / med, 2) if med else None,
+                                "mad": round(mad, 1),
+                                "peer_peak_threshold": peak_ctx.get("threshold"),
+                            },
+                        }
+                    )
 
     # ── Hourly distribution anomaly (IQR) ────────────────────
-    hourly = Counter(log.occurred_at.hour for log in logs)
+    hourly = activity.hourly_counts
     hours = list(hourly.values())
     if len(hours) >= 4:
         q1 = sorted(hours)[len(hours) // 4]
@@ -272,7 +381,8 @@ def _statistical_anomalies(
         iqr = q3 - q1
         upper_bound = q3 + 1.5 * iqr
 
-        for hour, count in hourly.items():
+        for hour in sorted(hourly):
+            count = hourly[hour]
             if count > upper_bound and iqr > 0:
                 found.append(
                     {
@@ -294,102 +404,87 @@ def _statistical_anomalies(
 
 
 def _rule_based_anomalies(
-    logs: list[Any], days: int
+    activity: EmployeeActivity,
+    days: int,
+    cohort: Cohort | None = None,
 ) -> list[dict[str, Any]]:
-    """Domain rule-based anomaly detection."""
-    if not logs:
+    """Domain rule-based anomaly detection.
+
+    Thresholds are peer-relative (see ``_peer_threshold``) so a rule fires
+    only for employees that genuinely stand out among their colleagues.
+    """
+    if not activity.total_logs:
         return []
 
     found: list[dict[str, Any]] = []
 
     # ── Rule: Off-hours data transfer ────────────────────────
-    data_xfers = [
-        log
-        for log in logs
-        if log.activity_type == ActivityType.DATA_TRANSFER
-        and (log.occurred_at.hour < 7 or log.occurred_at.hour > 19)
-    ]
-    if len(data_xfers) >= 3:
+    off_hours_xfers = activity.off_hours_of(ActivityType.DATA_TRANSFER)
+    threshold, ctx = _peer_threshold(cohort, "off_hours_transfers", 3)
+    if off_hours_xfers >= threshold:
         found.append(
             {
                 "type": "off_hours_data_transfer",
-                "description": f"{len(data_xfers)} data transfers during off-hours in the last {days} days",
-                "confidence": min(1.0, len(data_xfers) / 10),
+                "description": f"{off_hours_xfers} data transfers during off-hours in the last {days} days (peer threshold {threshold:.0f})",
+                "confidence": _confidence(off_hours_xfers, threshold),
                 "severity": AlertSeverity.HIGH,
                 "evidence": {
-                    "count": len(data_xfers),
+                    "count": off_hours_xfers,
+                    **ctx,
                     "dates": [
-                        d.occurred_at.isoformat() for d in data_xfers[:5]
+                        d.isoformat()
+                        for d in activity.off_hours_transfer_dates
                     ],
                 },
             }
         )
 
     # ── Rule: USB device usage spike ─────────────────────────
-    usb_events = [
-        log
-        for log in logs
-        if log.activity_type == ActivityType.USB_DEVICE
-    ]
-    if len(usb_events) >= 5:
+    usb_events = activity.count_of(ActivityType.USB_DEVICE)
+    threshold, ctx = _peer_threshold(cohort, "usb_events", 5)
+    if usb_events >= threshold:
         found.append(
             {
                 "type": "usb_device_spike",
-                "description": f"{len(usb_events)} USB device events detected",
-                "confidence": min(1.0, len(usb_events) / 15),
+                "description": f"{usb_events} USB device events detected (peer threshold {threshold:.0f})",
+                "confidence": _confidence(usb_events, threshold),
                 "severity": AlertSeverity.MEDIUM,
                 "evidence": {
-                    "count": len(usb_events),
-                    "devices": list(
-                        set(
-                            str(log.details.get("device", "unknown"))
-                            for log in usb_events
-                        )
-                    ),
+                    "count": usb_events,
+                    **ctx,
+                    "devices": sorted(activity.usb_devices),
                 },
             }
         )
 
     # ── Rule: Privilege changes ──────────────────────────────
-    priv_changes = [
-        log
-        for log in logs
-        if log.activity_type == ActivityType.PRIVILEGE_CHANGE
-    ]
-    if len(priv_changes) >= 2:
+    priv_changes = activity.count_of(ActivityType.PRIVILEGE_CHANGE)
+    threshold, ctx = _peer_threshold(cohort, "privilege_changes", 2)
+    if priv_changes >= threshold:
         found.append(
             {
                 "type": "privilege_escalation",
-                "description": f"{len(priv_changes)} privilege changes detected",
-                "confidence": min(1.0, len(priv_changes) / 5),
+                "description": f"{priv_changes} privilege changes detected (peer threshold {threshold:.0f})",
+                "confidence": _confidence(priv_changes, threshold),
                 "severity": AlertSeverity.HIGH,
-                "evidence": {"count": len(priv_changes)},
+                "evidence": {"count": priv_changes, **ctx},
             }
         )
 
     # ── Rule: Large file downloads ───────────────────────────
-    large_downloads = [
-        log
-        for log in logs
-        if log.activity_type == ActivityType.FILE_DOWNLOAD
-        and log.details.get("size_kb", 0) > 10000  # > 10 MB
-    ]
-    if len(large_downloads) >= 2:
+    large_downloads = activity.large_download_count
+    threshold, ctx = _peer_threshold(cohort, "large_downloads", 2)
+    if large_downloads >= threshold:
         found.append(
             {
                 "type": "large_file_downloads",
-                "description": f"{len(large_downloads)} large file downloads (>10MB)",
-                "confidence": min(1.0, len(large_downloads) / 8),
+                "description": f"{large_downloads} large file downloads (>10MB, peer threshold {threshold:.0f})",
+                "confidence": _confidence(large_downloads, threshold),
                 "severity": AlertSeverity.MEDIUM,
                 "evidence": {
-                    "count": len(large_downloads),
-                    "total_size_mb": round(
-                        sum(
-                            d.details.get("size_kb", 0) / 1024
-                            for d in large_downloads
-                        ),
-                        1,
-                    ),
+                    "count": large_downloads,
+                    **ctx,
+                    "total_size_mb": round(activity.large_download_kb / 1024, 1),
                 },
             }
         )
@@ -398,51 +493,55 @@ def _rule_based_anomalies(
 
 
 def _temporal_anomalies(
-    logs: list[Any], days: int
+    activity: EmployeeActivity,
+    days: int,
+    cohort: Cohort | None = None,
 ) -> list[dict[str, Any]]:
-    """Time-pattern based anomalies (weekends, late night, irregular)."""
-    if not logs:
+    """Time-pattern based anomalies (weekends, late night, irregular).
+
+    Thresholds are peer-relative, so a signal that every employee exhibits
+    (for example working most weekend days) simply stops firing instead of
+    raising an alert against the whole organization.
+    """
+    if not activity.total_logs:
         return []
 
     found: list[dict[str, Any]] = []
 
     # ── Late-night activity (midnight - 5AM) ─────────────────
-    late_night = [
-        log for log in logs if log.occurred_at.hour < 5
-    ]
-    if len(late_night) >= 5:
+    late_night = activity.late_night
+    threshold, ctx = _peer_threshold(cohort, "late_night", 5)
+    if late_night >= threshold:
         found.append(
             {
                 "type": "late_night_activity",
-                "description": f"{len(late_night)} late-night activities (midnight-5AM)",
-                "confidence": min(1.0, len(late_night) / 20),
+                "description": f"{late_night} late-night activities (midnight-5AM, peer threshold {threshold:.0f})",
+                "confidence": _confidence(late_night, threshold),
                 "severity": AlertSeverity.LOW,
                 "evidence": {
-                    "count": len(late_night),
+                    "count": late_night,
+                    **ctx,
                     "pct": round(
-                        len(late_night) / max(len(logs), 1) * 100, 1
+                        late_night / max(activity.total_logs, 1) * 100, 1
                     ),
                 },
             }
         )
 
     # ── Weekend activity concentration ───────────────────────
-    weekend_logs = [
-        log for log in logs if log.occurred_at.weekday() >= 5
-    ]
-    weekend_unique_days = len(
-        set(log.occurred_at.strftime("%Y-%m-%d") for log in weekend_logs)
-    )
-    if weekend_unique_days >= 4:
+    weekend_unique_days = activity.weekend_days
+    threshold, ctx = _peer_threshold(cohort, "weekend_days", 4)
+    if weekend_unique_days >= threshold:
         found.append(
             {
                 "type": "concentrated_weekend_access",
-                "description": f"Accessed systems on {weekend_unique_days} different weekend days",
-                "confidence": min(1.0, weekend_unique_days / 12),
+                "description": f"Accessed systems on {weekend_unique_days} different weekend days (peer threshold {threshold:.0f})",
+                "confidence": _confidence(weekend_unique_days, threshold),
                 "severity": AlertSeverity.LOW,
                 "evidence": {
                     "weekend_days": weekend_unique_days,
-                    "total_weekend_events": len(weekend_logs),
+                    **ctx,
+                    "total_weekend_events": activity.weekend_events,
                 },
             }
         )

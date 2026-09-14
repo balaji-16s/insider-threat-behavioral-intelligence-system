@@ -8,18 +8,21 @@ for Milestone 2's behavioral analytics module.
 
 from __future__ import annotations
 
-import math
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
-from statistics import mean, stdev, median
+from statistics import mean, stdev
 from typing import Any
 
 from sqlalchemy import case, cast, Date, func, or_
 from sqlalchemy.orm import Session
 
 from app.models.employee import Employee
-from app.models.activity_log import ActivityLog, ActivityType
+from app.models.activity_log import ActivityLog
 from app.models.behavioral_baseline import BehavioralBaseline
+from app.services.activity_aggregates import (
+    EmployeeActivity,
+    load_employee_activity,
+)
 
 
 # ── Public API ──────────────────────────────────────────────────
@@ -47,16 +50,15 @@ def compute_baseline(db: Session, employee_id: str) -> dict[str, Any]:
     return baseline
 
 
-def compute_all_baselines(db: Session) -> int:
+def compute_all_baselines(db: Session, days: int = 90) -> int:
     """Recompute baselines for every employee in the database.
 
-    Batched so whole-org computation stays fast and memory-bounded on large
-    datasets: employee activity is loaded in chunks with ``IN(...)`` queries
-    and peer statistics are aggregated per department in a single SQL pass
-    instead of firing per-employee queries (the old N+1 pattern).
+    Uses the shared SQL aggregation layer instead of materialising every
+    activity row as a Python object (millions of rows → tens of seconds),
+    and aggregates peer statistics per department in a single SQL pass.
     """
     employees = db.query(Employee).all()
-    cutoff = datetime.utcnow() - timedelta(days=90)
+    cutoff = datetime.utcnow() - timedelta(days=days)
 
     dept_stats = _department_peer_stats(db, cutoff, employees)
 
@@ -65,34 +67,32 @@ def compute_all_baselines(db: Session) -> int:
         for b in db.query(BehavioralBaseline).all()
     }
 
-    count = 0
-    for chunk in _chunks(employees, 20):
-        logs_by_employee: dict[str, list[Any]] = defaultdict(list)
-        for log in (
-            db.query(
-                ActivityLog.employee_id,
-                ActivityLog.activity_type,
-                ActivityLog.occurred_at,
-                ActivityLog.details,
-            )
-            .filter(
-                ActivityLog.employee_id.in_([e.id for e in chunk]),
-                ActivityLog.occurred_at >= cutoff,
-            )
-            .all()
-        ):
-            logs_by_employee[str(log.employee_id)].append(log)
+    # One aggregated view of activity for the whole org (two grouped
+    # queries) shared by every employee's baseline computation. Baselines
+    # only need volume and daily counts, so the other aggregates are skipped.
+    activity = load_employee_activity(
+        db, [e.id for e in employees], cutoff, sections={"daily"}
+    )
 
-        for emp in chunk:
-            logs = logs_by_employee.get(str(emp.id), [])
-            if not logs:
-                continue
-            data = _build_baseline(emp, logs, dept_stats)
-            _store_baseline(existing, db, str(emp.id), data)
-            count += 1
+    count = 0
+    for emp in employees:
+        act = activity.get(str(emp.id))
+        if act is None or not act.total_logs:
+            continue
+        data = _build_baseline_from_aggregates(emp, act, dept_stats)
+        _store_baseline(existing, db, str(emp.id), data)
+        count += 1
 
     db.commit()
     return count
+
+
+def _hours_by_type(activity: EmployeeActivity) -> dict[str, dict[int, int]]:
+    """Reshape ``(type, hour) -> count`` into ``type -> {hour: count}``."""
+    by_type: dict[str, dict[int, int]] = defaultdict(dict)
+    for (atype, hour), count in activity.type_hour_counts.items():
+        by_type[atype][hour] = count
+    return by_type
 
 
 def store_baseline(
@@ -163,27 +163,100 @@ def _department_peer_stats(
     return stats
 
 
-def _build_baseline(
+def _build_baseline_from_aggregates(
     employee: Employee,
-    logs: list[ActivityLog],
+    activity: EmployeeActivity,
     dept_stats: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    """Build a full baseline for one employee from preloaded logs."""
+    """Build a full baseline for one employee from SQL aggregates.
+
+    Produces exactly the same keys/values as the per-row implementation,
+    but from pre-aggregated counts so no activity rows are materialised.
+    """
+    total = activity.total_logs
+    daily = activity.daily_counts
+
+    hour_summary = {}
+    for atype, hours in _hours_by_type(activity).items():
+        type_total = sum(hours.values())
+        hour_summary[atype] = {
+            "mean_hour": round(
+                sum(hour * count for hour, count in hours.items())
+                / max(type_total, 1),
+                1,
+            ),
+            # max over sorted hours makes ties deterministic (lowest wins)
+            "peak_hour": max(sorted(hours), key=hours.__getitem__),
+        }
+
+    counts = list(daily.values())
+    burst_threshold = (
+        mean(counts) + 2 * (stdev(counts) if len(counts) > 1 else 0)
+        if counts
+        else 0
+    )
+    burst_days = sum(1 for c in counts if c > burst_threshold)
+
     data: dict[str, Any] = {
         "generated_at": datetime.utcnow().isoformat(),
-        "total_logs": len(logs),
-        "daily_avg": round(len(logs) / 30, 2) if logs else 0,
+        "total_logs": total,
+        "daily_avg": round(total / 30, 2) if total else 0,
+        "activity_distribution": dict(activity.type_counts),
+        "activity_hourly_patterns": hour_summary,
+        "weekend_activity": activity.weekend_events,
+        "total_off_hours": activity.off_hours,
+        "late_night_activity": activity.late_night,
+        "off_hours_pct": round(activity.off_hours / max(total, 1) * 100, 1),
+        "burst_days": burst_days,
+        "avg_events_per_day": round(mean(counts), 1) if counts else 0,
     }
-    data.update(_activity_type_profile(logs))
-    data.update(_temporal_profile(logs))
-    data.update(_statistical_baselines(logs))
-    data.update(_peer_comparison_from_stats(employee, logs, dept_stats))
+    data.update(_statistical_baselines_from_counts(activity.hourly_counts))
+    data.update(
+        _peer_comparison_from_stats(
+            employee,
+            Counter(
+                {d.strftime("%Y-%m-%d"): c for d, c in daily.items()}
+            ),
+            activity.off_hours,
+            total,
+            dept_stats,
+        )
+    )
     return data
+
+
+def _statistical_baselines_from_counts(
+    hourly_counts: Counter[int],
+) -> dict[str, Any]:
+    """Z-score markers derived from per-hour activity counts."""
+    values = list(hourly_counts.values())
+    if len(values) < 2:
+        return {
+            "hourly_activity_mean": 0,
+            "hourly_activity_std": 0,
+            "z_score_threshold": 2.0,
+        }
+
+    m = mean(values)
+    s = stdev(values)
+
+    return {
+        "hourly_activity_mean": round(m, 2),
+        "hourly_activity_std": round(s, 2),
+        "z_score_threshold": 2.0,
+        "anomaly_hours": sorted(
+            int(h)
+            for h, c in hourly_counts.items()
+            if (c - m) / max(s, 0.01) > 2.0
+        ),
+    }
 
 
 def _peer_comparison_from_stats(
     employee: Employee,
-    employee_logs: list[ActivityLog],
+    emp_daily: Counter[str],
+    emp_off_hours: int,
+    total_logs: int,
     dept_stats: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     """Peer comparison using precomputed per-department stats (no queries)."""
@@ -192,17 +265,9 @@ def _peer_comparison_from_stats(
     if not stats:
         return {"peer_group": None}
 
-    emp_daily = Counter(
-        log.occurred_at.strftime("%Y-%m-%d") for log in employee_logs
-    )
     emp_avg = round(mean(emp_daily.values()), 1) if emp_daily else 0
-    emp_off_hours = sum(
-        1
-        for log in employee_logs
-        if log.occurred_at.hour < 7 or log.occurred_at.hour > 19
-    )
     emp_off_hours_pct = round(
-        emp_off_hours / max(len(employee_logs), 1) * 100, 1
+        emp_off_hours / max(total_logs, 1) * 100, 1
     )
 
     return {
@@ -291,7 +356,8 @@ def _activity_type_profile(logs: list[ActivityLog]) -> dict[str, Any]:
         if hours:
             hour_summary[atype] = {
                 "mean_hour": round(mean(hours), 1),
-                "peak_hour": max(set(hours), key=hours.count),
+                # sorted() makes ties deterministic (lowest peak hour wins)
+                "peak_hour": max(sorted(set(hours)), key=hours.count),
             }
 
     return {
@@ -347,16 +413,15 @@ def _statistical_baselines(logs: list[ActivityLog]) -> dict[str, Any]:
 
     m = mean(values)
     s = stdev(values)
-
     return {
         "hourly_activity_mean": round(m, 2),
         "hourly_activity_std": round(s, 2),
         "z_score_threshold": 2.0,
-        "anomaly_hours": [
+        "anomaly_hours": sorted(
             int(h)
             for h, c in hourly_counts.items()
             if (c - m) / max(s, 0.01) > 2.0
-        ],
+        ),
     }
 
 

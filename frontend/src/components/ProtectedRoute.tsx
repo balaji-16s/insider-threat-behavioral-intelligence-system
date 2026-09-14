@@ -3,8 +3,21 @@ import { useAuth } from '../context/AuthContext';
 import Layout from './Layout';
 import { type ReactNode } from 'react';
 
-export default function ProtectedRoute({ children }: { children: ReactNode }) {
-  const { isAuthenticated, isLoading } = useAuth();
+/**
+ * Route guard.
+ *
+ * `staffOnly` marks the analyst/SOC pages. Worker portal accounts are
+ * redirected to their own dashboard instead — the backend rejects them
+ * with 403 regardless, this just avoids showing them a broken page.
+ */
+export default function ProtectedRoute({
+  children,
+  staffOnly = false,
+}: {
+  children: ReactNode;
+  staffOnly?: boolean;
+}) {
+  const { isAuthenticated, isLoading, user } = useAuth();
 
   if (isLoading) {
     return (
@@ -19,6 +32,10 @@ export default function ProtectedRoute({ children }: { children: ReactNode }) {
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
+  }
+
+  if (staffOnly && user?.role === 'employee') {
+    return <Navigate to="/my-dashboard" replace />;
   }
 
   return <Layout>{children}</Layout>;

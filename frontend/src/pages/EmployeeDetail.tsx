@@ -1,12 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { getEmployee, type Employee } from '../api/employees';
 import { listActivityLogs, type ActivityLog } from '../api/activityLogs';
 import { getRiskScoreHistory, type RiskScore } from '../api/riskScores';
 import { listAlerts, type Alert } from '../api/alerts';
+import { runUebaPipeline } from '../api/ueba';
+import { useAuth } from '../context/AuthContext';
 import {
   ArrowLeft, Activity, AlertTriangle, BarChart3, Building2, Monitor, Shield,
-  Calendar, ChevronRight,
+  Calendar, ChevronRight, RefreshCw, CheckCircle2,
 } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -37,36 +39,73 @@ const typeBg: Record<string, string> = {
 export default function EmployeeDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [employee, setEmployee] = useState<Employee | null>(null);
   const [recentLogs, setRecentLogs] = useState<ActivityLog[]>([]);
   const [riskHistory, setRiskHistory] = useState<RiskScore[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'logs' | 'alerts' | 'risk'>('logs');
+  const [recalculating, setRecalculating] = useState(false);
+  const [pipelineMsg, setPipelineMsg] = useState<string | null>(null);
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
+
+  // The scoring pipeline is restricted to these roles server-side (a
+  // security_analyst receives 403), so the control is hidden for them
+  // rather than failing when clicked.
+  const canRecalculate =
+    user?.role === 'administrator' ||
+    user?.role === 'security_manager' ||
+    user?.role === 'soc_engineer';
+
+  const load = useCallback(async () => {
+    if (!id) return;
+    try {
+      const [emp, logs, rh, al] = await Promise.all([
+        getEmployee(id),
+        listActivityLogs({ employee_id: id, limit: 50 }),
+        getRiskScoreHistory(id, 30),
+        listAlerts({ employee_id: id, limit: 20 }),
+      ]);
+      setEmployee(emp);
+      setRecentLogs(logs);
+      setRiskHistory(rh.reverse());
+      setAlerts(al);
+    } catch (err) {
+      console.error('Failed to load employee:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [id]);
 
   useEffect(() => {
-    if (!id) return;
-    const employeeId = id;
-    async function load() {
-      try {
-        const [emp, logs, rh, al] = await Promise.all([
-          getEmployee(employeeId),
-          listActivityLogs({ employee_id: employeeId, limit: 50 }),
-          getRiskScoreHistory(employeeId, 30),
-          listAlerts({ employee_id: employeeId, limit: 20 }),
-        ]);
-        setEmployee(emp);
-        setRecentLogs(logs);
-        setRiskHistory(rh.reverse());
-        setAlerts(al);
-      } catch (err) {
-        console.error('Failed to load employee:', err);
-      } finally {
-        setLoading(false);
-      }
-    }
     load();
-  }, [id]);
+  }, [load]);
+
+  // Runs the full pipeline for this one employee: refresh their baseline,
+  // re-run anomaly detection, then recalculate and persist their risk
+  // score — then reloads the page data so the new score and alerts show.
+  async function handleRecalculate() {
+    if (!employee) return;
+    setRecalculating(true);
+    setPipelineMsg(null);
+    setPipelineError(null);
+    try {
+      const result = await runUebaPipeline(30, employee.id);
+      setPipelineMsg(
+        `Baseline refreshed, ${result.employees_with_anomalies} anomaly scan(s), ` +
+        `${result.alerts_created} new alert(s), score persisted for ` +
+        `${result.risk_scores_calculated} employee(s).`
+      );
+      await load();
+    } catch (err) {
+      setPipelineError(
+        err instanceof Error ? err.message : 'Recalculation failed'
+      );
+    } finally {
+      setRecalculating(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -96,27 +135,64 @@ export default function EmployeeDetail() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center gap-4">
-        <button
-          onClick={() => navigate('/employees')}
-          className="p-2 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-surface-800 transition-all"
-        >
-          <ArrowLeft className="w-5 h-5" />
-        </button>
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-full bg-cyber-500/10 flex items-center justify-center">
-            <span className="text-lg font-bold text-cyber-400">
-              {employee.full_name.charAt(0).toUpperCase()}
-            </span>
-          </div>
-          <div>
-            <h1 className="text-xl font-bold text-white">{employee.full_name}</h1>
-            <p className="text-sm text-gray-500">
-              {employee.designation || 'Employee'} • {employee.employee_code}
-            </p>
+          <button
+            onClick={() => navigate('/employees')}
+            className="p-2 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-surface-800 transition-all"
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </button>
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-full bg-cyber-500/10 flex items-center justify-center">
+              <span className="text-lg font-bold text-cyber-400">
+                {employee.full_name.charAt(0).toUpperCase()}
+              </span>
+            </div>
+            <div>
+              <h1 className="text-xl font-bold text-white">{employee.full_name}</h1>
+              <p className="text-sm text-gray-500">
+                {employee.designation || 'Employee'} • {employee.employee_code}
+              </p>
+            </div>
           </div>
         </div>
+
+        {canRecalculate && (
+          <button
+            onClick={handleRecalculate}
+            disabled={recalculating}
+            title="Refresh this employee's baseline, re-run anomaly detection, then recalculate their risk score"
+            className="flex items-center gap-2 px-4 py-2.5 bg-cyber-500/20 border border-cyber-500/30
+              text-cyber-400 rounded-lg font-medium hover:bg-cyber-500/30 transition-all duration-150
+              disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {recalculating ? (
+              <div className="w-4 h-4 border-2 border-cyber-400 border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+            {recalculating ? 'Recalculating…' : 'Recalculate Score'}
+          </button>
+        )}
       </div>
+
+      {pipelineMsg && (
+        <div className="p-3.5 rounded-lg bg-matrix-500/10 border border-matrix-500/20 flex items-start gap-3">
+          <CheckCircle2 className="w-5 h-5 text-matrix-400 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm text-matrix-400 font-medium">Risk score recalculated</p>
+            <p className="text-xs text-gray-500 mt-0.5">{pipelineMsg}</p>
+          </div>
+        </div>
+      )}
+
+      {pipelineError && (
+        <div className="p-3.5 rounded-lg bg-danger-500/10 border border-danger-500/20 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-danger-400 shrink-0 mt-0.5" />
+          <p className="text-sm text-danger-400">{pipelineError}</p>
+        </div>
+      )}
 
       {/* Info cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

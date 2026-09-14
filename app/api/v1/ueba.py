@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from app.db.base import get_db
-from app.core.deps import get_current_user, require_role
+from app.core.deps import require_role, require_staff
 from app.models.user import User
 
 from app.schemas.ueba import (
@@ -41,7 +41,7 @@ def ueba_overview(
     days: int = Query(30, ge=1, le=365),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Consolidated UEBA view for every employee."""
     return get_ueba_overview(db, days=days, limit=limit)
@@ -52,7 +52,7 @@ def employee_ueba(
     employee_id: str,
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Consolidated UEBA view for a single employee."""
     try:

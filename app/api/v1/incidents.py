@@ -15,7 +15,7 @@ from app.schemas.incident import (
     TimelineEventIn,
 )
 from app.schemas.alert import AlertOut
-from app.core.deps import get_current_user, require_role
+from app.core.deps import require_role, require_staff
 from app.models.user import User
 
 router = APIRouter(prefix="/api/v1/incidents", tags=["Incidents"])
@@ -28,7 +28,7 @@ def list_incidents(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     query = db.query(Incident)
     if status:
@@ -42,7 +42,7 @@ def list_incidents(
 def get_incident(
     incident_id: uuid.UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     incident = db.query(Incident).filter(Incident.id == incident_id).first()
     if not incident:
@@ -148,7 +148,7 @@ def add_timeline_event(
 def get_related_alerts(
     incident_id: uuid.UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Resolve the alerts that triggered (or are linked to) this incident."""
     incident = db.query(Incident).filter(Incident.id == incident_id).first()

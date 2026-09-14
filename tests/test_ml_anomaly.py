@@ -3,6 +3,7 @@
 import random
 from datetime import datetime, timedelta
 
+import numpy as np
 import pytest
 
 from app.models.activity_log import ActivityLog, ActivityType
@@ -148,6 +149,50 @@ def test_train_and_save_model_persists(db, monkeypatch, tmp_path):
     )
     assert result["scanned_employees"] == 42
     assert result["model_trained_at"] is not None
+
+
+def test_stale_persisted_model_is_refit(db, monkeypatch, tmp_path):
+    """A model fitted on a different window must not flag almost everyone."""
+    monkeypatch.setattr(ml_anomaly_detection, "RESULTS_CACHE", tmp_path / "ml.json")
+    _seed_population(db)
+    ml_anomaly_detection.run_ml_anomaly_detection(db, days=30, contamination=0.05)
+
+    # Shift the whole population to a very different behavioural profile
+    # (high volume, all off-hours) — the persisted model is now stale.
+    now = datetime.utcnow()
+    for emp in db.query(Employee).all():
+        for day in range(5):
+            for _ in range(40):
+                db.add(
+                    ActivityLog(
+                        employee_id=emp.id,
+                        activity_type=ActivityType.DATA_TRANSFER,
+                        source="test",
+                        details={"bytes": 1},
+                        occurred_at=now.replace(
+                            hour=2, minute=0, second=0, microsecond=0
+                        )
+                        - timedelta(days=day + 1),
+                    )
+                )
+    db.commit()
+
+    model, _meta = ml_anomaly_detection.load_trained_model()
+    records, _ = ml_anomaly_detection._build_feature_records(
+        db, db.query(Employee).all(), 30
+    )
+    X = np.array(
+        [[r["features"][f] for f in ml_anomaly_detection.FEATURES] for r in records],
+        dtype=float,
+    )
+    assert ml_anomaly_detection._is_stale_model(model, X, 0.05) is True
+
+    result = ml_anomaly_detection.run_ml_anomaly_detection(
+        db, days=30, contamination=0.05
+    )
+    assert result["outliers_detected"] <= max(
+        1, int(0.3 * result["scanned_employees"])
+    )
 
 
 def test_retrain_overwrites_model(db, monkeypatch, tmp_path):

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from app.db.base import get_db
-from app.core.deps import get_current_user, require_role
+from app.core.deps import require_role, require_staff
 from app.models.user import User
 from app.models.employee import Employee
 
@@ -47,7 +47,7 @@ def ml_detect(
     contamination: float = Query(0.05, ge=0.01, le=0.30),
     retrain: bool = Query(False, description="Force re-fitting the model before scoring"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Score all employees with the trained Isolation Forest model.
 
@@ -75,7 +75,7 @@ def ml_train(
 @router.get("/ml/results", response_model=MlDetectionResult | None)
 def ml_results(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Return the most recent ML anomaly detection run (cached)."""
     return get_cached_ml_results()
@@ -85,7 +85,7 @@ def ml_results(
 def detect_anomalies(
     req: AnomalyDetectionRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Run the anomaly detection pipeline. Optionally scope to an employee."""
     result = run_anomaly_detection(db, req.employee_id, req.days)
@@ -96,7 +96,7 @@ def detect_anomalies(
 def list_anomaly_alerts(
     employee_id: Optional[str] = Query(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """List open anomaly alerts."""
     return get_anomaly_summary(db, employee_id)
@@ -105,7 +105,7 @@ def list_anomaly_alerts(
 @router.get("/alerts/stats")
 def anomaly_alerts_stats(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Real totals of open anomaly alerts (not capped like the list)."""
     return get_anomaly_stats(db)
@@ -114,7 +114,7 @@ def anomaly_alerts_stats(
 @router.get("/detect/latest", response_model=AnomalyDetectionResult | None)
 def latest_detection(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Return the most recent anomaly detection run (persisted)."""
     return get_cached_detection_results()
@@ -148,7 +148,7 @@ def compute_baselines(
 def get_baseline(
     employee_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Get the behavioral baseline/profile for an employee."""
     profile = get_employee_profile(db, employee_id)
@@ -162,7 +162,7 @@ def assess_threat(
     employee_id: Optional[str] = Query(None),
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Assess insider threat level for an employee or all employees."""
     if employee_id:
@@ -177,7 +177,7 @@ def assess_threat(
 def top_threats(
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Get the top threats across the organization."""
     results = get_top_threats(db, limit)
@@ -189,7 +189,7 @@ def employee_threat(
     employee_id: str,
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Get detailed threat assessment for a specific employee."""
     result = assess_employee_threat(db, employee_id, days)

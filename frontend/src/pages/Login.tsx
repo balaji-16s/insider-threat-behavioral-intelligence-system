@@ -23,17 +23,19 @@ export default function Login() {
     setLoading(true);
 
     try {
+      let session;
       if (isRegister) {
         await register({
           full_name: form.full_name,
           email: form.email,
           password: form.password,
         });
-        await login({ username: form.email, password: form.password });
+        session = await login({ username: form.email, password: form.password });
       } else {
-        await login({ username: form.username, password: form.password });
+        session = await login({ username: form.username, password: form.password });
       }
-      navigate('/dashboard');
+      // Portal (employee) accounts land on their own dashboard.
+      navigate(session.role === 'employee' ? '/my-dashboard' : '/dashboard');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {

@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import {
   LayoutDashboard, Users, Activity, AlertTriangle, ShieldAlert,
-  BarChart3, LogOut, Menu, Shield, Zap, Search, FileText, Radar,
+  BarChart3, LogOut, Menu, Shield, Zap, Search, FileText, Radar, Gauge,
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -11,9 +11,12 @@ interface NavItem {
   label: string;
   path: string;
   icon: typeof LayoutDashboard;
+  /** Shown only to portal (employee) accounts. */
+  employeeOnly?: boolean;
 }
 
 const navItems: NavItem[] = [
+  { label: 'My Dashboard', path: '/my-dashboard', icon: Gauge, employeeOnly: true },
   { label: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
   { label: 'Employees', path: '/employees', icon: Users },
   { label: 'Activity Logs', path: '/activity-logs', icon: Activity },
@@ -31,6 +34,13 @@ export default function Layout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Portal accounts only ever get their own dashboard; security-staff
+  // pages are hidden from them (and rejected server-side).
+  const isEmployee = user?.role === 'employee';
+  const visibleNavItems = navItems.filter((item) =>
+    isEmployee ? item.employeeOnly : !item.employeeOnly
+  );
 
   const handleLogout = () => {
     logout();
@@ -57,12 +67,14 @@ export default function Layout({ children }: { children: ReactNode }) {
           <Shield className="w-8 h-8 text-cyber-400" />
           <div>
             <h1 className="text-sm font-bold text-white">ITBIS</h1>
-            <p className="text-xs text-gray-500">Threat Intelligence</p>
+            <p className="text-xs text-gray-500">
+              {isEmployee ? 'Employee Portal' : 'Threat Intelligence'}
+            </p>
           </div>
         </div>
 
         <nav className="flex-1 px-3 py-4 space-y-1">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const isActive = location.pathname.startsWith(item.path);
             const Icon = item.icon;
             return (

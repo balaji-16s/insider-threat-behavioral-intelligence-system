@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.base import get_db
-from app.core.deps import get_current_user
+from app.core.deps import require_staff
 from app.models.user import User
 from app.models.notification import NotificationType
 from app.schemas.notification import NotificationOut, NotificationCreate
@@ -20,7 +20,7 @@ def list_notifications_endpoint(
     limit: int = Query(50, ge=1, le=200),
     notification_type: Optional[NotificationType] = Query(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """List system notifications (threat alerts, escalations, compliance updates)."""
     return get_notifications(db, limit=limit, notification_type=notification_type)
@@ -30,7 +30,7 @@ def list_notifications_endpoint(
 def send_notification_endpoint(
     payload: NotificationCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Manually dispatch a security event or compliance notification."""
     return send_notification(

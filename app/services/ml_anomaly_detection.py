@@ -24,7 +24,6 @@ includes an explainable breakdown of the top deviating features.
 from __future__ import annotations
 
 import json
-from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import mean, median, stdev
@@ -35,9 +34,13 @@ import numpy as np
 from sklearn.ensemble import IsolationForest
 from sqlalchemy.orm import Session
 
-from app.models.activity_log import ActivityLog, ActivityType
+from app.models.activity_log import ActivityType
 from app.models.behavioral_baseline import BehavioralBaseline
 from app.models.employee import Employee
+from app.services.activity_aggregates import (
+    EmployeeActivity,
+    load_employee_activity,
+)
 
 MODEL_NAME = "Isolation Forest"
 MODEL_VERSION = "v1"
@@ -122,6 +125,11 @@ def run_ml_anomaly_detection(
             meta.get("contamination", -1.0) - contamination
         ) > 1e-6:
             model, meta = None, None  # trained for a different contamination
+        elif model is not None and _is_stale_model(model, X, contamination):
+            # The persisted model was fitted on a different activity window:
+            # re-using it flags almost every employee as an outlier with
+            # identical scores, so refit on the current window instead.
+            model, meta = None, None
     if model is None:
         model, meta = _fit_and_save_model(
             X, records, days, contamination, no_activity
@@ -251,49 +259,37 @@ def _build_feature_records(
     }
     cutoff = datetime.utcnow() - timedelta(days=days)
 
+    # Aggregate in SQL instead of materialising every activity row: the
+    # features are all counts, and a 30-day CERT window is ~1.2M rows as
+    # ORM objects versus ~70K aggregate rows here.
+    activity = load_employee_activity(
+        db, [e.id for e in employees], cutoff, sections={"daily", "pcs"}
+    )
+
     records: list[dict[str, Any]] = []
     no_activity = 0
-    # Load activity in small chunks (one query per chunk) instead of one
-    # query per employee, which previously made feature extraction fire
-    # 1,000+ queries on large datasets.
-    for chunk in _chunks(employees, 20):
-        logs_by_employee: dict[str, list[Any]] = defaultdict(list)
-        for log in (
-            db.query(
-                ActivityLog.employee_id,
-                ActivityLog.activity_type,
-                ActivityLog.occurred_at,
-                ActivityLog.details,
-            )
-            .filter(
-                ActivityLog.employee_id.in_([e.id for e in chunk]),
-                ActivityLog.occurred_at >= cutoff,
-            )
-            .all()
-        ):
-            logs_by_employee[str(log.employee_id)].append(log)
-
-        for emp in chunk:
-            feats = _extract_features(
-                logs_by_employee.get(str(emp.id), []),
-                days,
-                baselines.get(emp.id, {}),
-            )
-            if feats is None:
-                # No behavioral data in the window — nothing to judge, so
-                # exclude from model scoring to avoid all-zero false positives.
-                no_activity += 1
-                continue
-            records.append(
-                {
-                    "employee_id": str(emp.id),
-                    "employee_code": emp.employee_code,
-                    "employee_name": emp.full_name,
-                    "department": emp.department,
-                    "designation": emp.designation,
-                    "features": feats,
-                }
-            )
+    for emp in employees:
+        acts = activity.get(str(emp.id))
+        feats = (
+            _extract_features(acts, days, baselines.get(emp.id, {}))
+            if acts is not None
+            else None
+        )
+        if feats is None:
+            # No behavioral data in the window — nothing to judge, so
+            # exclude from model scoring to avoid all-zero false positives.
+            no_activity += 1
+            continue
+        records.append(
+            {
+                "employee_id": str(emp.id),
+                "employee_code": emp.employee_code,
+                "employee_name": emp.full_name,
+                "department": emp.department,
+                "designation": emp.designation,
+                "features": feats,
+            }
+        )
     return records, no_activity
 
 
@@ -337,6 +333,26 @@ def load_trained_model() -> tuple[Any, dict[str, Any] | None]:
         return None, None
 
 
+def _is_stale_model(
+    model: Any, X: np.ndarray, contamination: float
+) -> bool:
+    """Detect a persisted model that no longer matches the current window.
+
+    An Isolation Forest fitted on a different activity window (or a
+    different scale of features) will flag a large majority of employees
+    as outliers, producing a useless "everyone is critical" result. When
+    the flagged share far exceeds the requested contamination rate, the
+    model is treated as stale and refitted.
+    """
+    if len(X) == 0:
+        return False
+    flagged = int((model.predict(X) == -1).sum())
+    # Allow generous slack (3x contamination, at least 25%) so a genuine
+    # distribution shift does not cause an unnecessary refit.
+    max_expected_ratio = max(contamination * 3, 0.25)
+    return (flagged / len(X)) > max_expected_ratio
+
+
 def _save_model(
     model: Any, meta: dict[str, Any]
 ) -> dict[str, Any]:
@@ -364,53 +380,20 @@ def get_cached_ml_results() -> dict[str, Any] | None:
 
 
 def _extract_features(
-    logs: list[Any], days: int, baseline: dict[str, Any]
+    activity: EmployeeActivity | None,
+    days: int,
+    baseline: dict[str, Any],
 ) -> dict[str, float] | None:
     """Build a behavioral feature vector for one employee over the window.
 
-    ``logs`` must already be scoped to the employee and the lookback window
-    (callers batch-load them).
+    ``activity`` must already be scoped to the employee and the lookback
+    window (callers aggregate it in SQL once and share it).
     """
-    if not logs:
+    if activity is None or not activity.total_logs:
         return None
 
-    n = len(logs)
-    type_counts: Counter[str] = Counter()
-    pcs: set[str] = set()
-    hours: set[int] = set()
-    daily: Counter[str] = Counter()
-    off_hours = 0
-    late_night = 0
-    weekend = 0
-    xfer_off_hours = 0
-    xfer_total = 0
-
-    for log in logs:
-        atype = (
-            log.activity_type.value
-            if hasattr(log.activity_type, "value")
-            else str(log.activity_type)
-        )
-        type_counts[atype] += 1
-        hour = log.occurred_at.hour
-        hours.add(hour)
-        day_key = log.occurred_at.strftime("%Y-%m-%d")
-        daily[day_key] += 1
-
-        pc = str(log.details.get("pc", "") or "")
-        if pc:
-            pcs.add(pc)
-
-        if hour < 7 or hour > 19:
-            off_hours += 1
-            if atype == "data_transfer":
-                xfer_off_hours += 1
-        if hour < 5:
-            late_night += 1
-        if log.occurred_at.weekday() >= 5:
-            weekend += 1
-
-    xfer_total = type_counts.get("data_transfer", 0)
+    n = activity.total_logs
+    xfer_total = activity.count_of(ActivityType.DATA_TRANSFER)
 
     # Deviation from the stored behavioral baseline (if available)
     baseline_deviation = 0.0
@@ -419,30 +402,28 @@ def _extract_features(
         recent_avg = n / max(days, 1)
         baseline_deviation = abs(recent_avg - b_daily_avg) / max(b_daily_avg, 0.1)
 
-    counts = list(daily.values())
+    counts = list(activity.daily_counts.values())
     return {
         "total_logs": float(n),
         "daily_avg": round(n / max(days, 1), 3),
-        "login_count": float(type_counts.get("login", 0)),
+        "login_count": float(activity.count_of(ActivityType.LOGIN)),
         "data_transfer_count": float(xfer_total),
-        "usb_count": float(type_counts.get("usb_device", 0)),
-        "off_hours_pct": round(off_hours / n * 100, 3),
-        "late_night_count": float(late_night),
-        "weekend_pct": round(weekend / n * 100, 3),
-        "unique_pcs": float(len(pcs)),
-        "unique_hours": float(len(hours)),
+        "usb_count": float(activity.count_of(ActivityType.USB_DEVICE)),
+        "off_hours_pct": round(activity.off_hours / n * 100, 3),
+        "late_night_count": float(activity.late_night),
+        "weekend_pct": round(activity.weekend_events / n * 100, 3),
+        "unique_pcs": float(activity.unique_pcs),
+        "unique_hours": float(activity.unique_hours),
         "daily_std": round(stdev(counts), 3) if len(counts) > 1 else 0.0,
         "data_transfer_off_hours_pct": round(
-            xfer_off_hours / max(xfer_total, 1) * 100, 3
+            activity.off_hours_of(ActivityType.DATA_TRANSFER)
+            / max(xfer_total, 1)
+            * 100,
+            3,
         ),
         "avg_data_per_day": round(xfer_total / max(days, 1), 3),
         "baseline_deviation": round(baseline_deviation, 3),
     }
-
-
-def _chunks(items: list[Any], size: int) -> list[list[Any]]:
-    """Split a list into consecutive chunks of at most ``size`` items."""
-    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 # ── Scoring & explainability ────────────────────────────────────

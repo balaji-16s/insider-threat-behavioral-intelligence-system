@@ -15,7 +15,7 @@ from app.services.risk_scoring import (
     calculate_risk_scores,
     get_risk_analytics,
 )
-from app.core.deps import get_current_user, require_role
+from app.core.deps import require_role, require_staff
 from app.models.user import User
 
 router = APIRouter(prefix="/api/v1/risk-scores", tags=["Risk Scores"])
@@ -27,7 +27,7 @@ def list_risk_scores(
     risk_level: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     subquery = (
         db.query(
@@ -55,7 +55,7 @@ def get_risk_score_history(
     employee_id: uuid.UUID,
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     return (
         db.query(RiskScore)
@@ -69,7 +69,7 @@ def get_risk_score_history(
 @router.get("/distribution")
 def get_risk_distribution(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     from sqlalchemy import func
 
@@ -113,7 +113,7 @@ def recalculate_risk_scores(
 def risk_analytics(
     days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_staff),
 ):
     """Organization-wide risk analytics: distribution, trend, and department breakdown."""
     return get_risk_analytics(db, days=days)
